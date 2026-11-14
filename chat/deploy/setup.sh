@@ -5,6 +5,8 @@ DOMAIN="${1:?Укажи домен: bash setup.sh duoverse.net}"
 REPO="${REPO:-https://github.com/SME2411/KeyboardLock.git}"
 BRANCH="${BRANCH:-claude/chat-app-lf4nji}"
 
+# остатки прошлой неудачной попытки ломают apt, чистим до первого apt-get
+rm -f /etc/apt/sources.list.d/caddy.list /usr/share/keyrings/caddy.gpg
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get -y upgrade
 apt-get install -y ufw git curl ca-certificates debian-keyring debian-archive-keyring apt-transport-https gnupg unattended-upgrades
@@ -14,7 +16,6 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
 
 # Caddy (официальный способ из документации Caddy)
-rm -f /etc/apt/sources.list.d/caddy.list /usr/share/keyrings/caddy.gpg   # остатки прошлой неудачной попытки
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list
 apt-get update
