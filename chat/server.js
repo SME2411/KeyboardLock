@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
+import * as webpush from 'web-push';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
@@ -28,6 +29,10 @@ db.exec(`
     id INTEGER PRIMARY KEY, from_id INTEGER NOT NULL, to_id INTEGER NOT NULL,
     text TEXT NOT NULL, created_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_id, to_id, id);
+  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS push_subs (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, endpoint TEXT UNIQUE NOT NULL,
+    p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL);
 `);
 
 const q = {
@@ -40,10 +45,41 @@ const q = {
   sessionUser: db.prepare('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
   addMsg: db.prepare('INSERT INTO messages (from_id, to_id, text, created_at) VALUES (?, ?, ?, ?)'),
+  getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+  setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
+  addSub: db.prepare(`INSERT INTO push_subs (user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`),
+  subsOf: db.prepare('SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?'),
+  delSub: db.prepare('DELETE FROM push_subs WHERE endpoint = ?'),
   history: db.prepare(`SELECT id, from_id, to_id, text, created_at FROM messages
     WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND (?3 = 0 OR id < ?3)
     ORDER BY id DESC LIMIT 50`),
 };
+
+// ---------- web push ----------
+// VAPID-ключи создаются один раз и хранятся в базе (они входят в бэкап).
+let vapidPublic = q.getSetting.get('vapid_public')?.value;
+let vapidPrivate = q.getSetting.get('vapid_private')?.value;
+if (!vapidPublic || !vapidPrivate) {
+  const k = webpush.generateVAPIDKeys();
+  vapidPublic = k.publicKey; vapidPrivate = k.privateKey;
+  q.setSetting.run('vapid_public', vapidPublic);
+  q.setSetting.run('vapid_private', vapidPrivate);
+}
+webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'https://duoverse-app.org', vapidPublic, vapidPrivate);
+
+async function pushTo(userId, payload) {
+  for (const sub of q.subsOf.all(userId)) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        JSON.stringify(payload), { TTL: 60 * 60 * 24, urgency: 'high' });
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) q.delSub.run(sub.endpoint); // подписка устарела
+      else console.error('push error', e.statusCode || e.message);
+    }
+  }
+}
 
 // ---------- auth ----------
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
@@ -151,6 +187,18 @@ async function api(req, res, url) {
     if (!q.userById.get(other)) return json(res, 404, { error: 'no user' });
     return json(res, 200, q.history.all(me.id, other, before).reverse());
   }
+  if (url.pathname === '/api/push/key') return json(res, 200, { key: vapidPublic });
+  if (url.pathname === '/api/push/subscribe' && req.method === 'POST') {
+    const b = await readJson(req);
+    const ep = String(b.endpoint || ''), p = String(b.keys?.p256dh || ''), a = String(b.keys?.auth || '');
+    if (!ep.startsWith('https://') || !p || !a || ep.length > 1000) return json(res, 400, { error: 'bad subscription' });
+    q.addSub.run(me.id, ep, p, a, Date.now());
+    return json(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/push/unsubscribe' && req.method === 'POST') {
+    q.delSub.run(String((await readJson(req)).endpoint || ''));
+    return json(res, 200, { ok: true });
+  }
   json(res, 404, { error: 'not found' });
 }
 
@@ -182,6 +230,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (data) => {
     let m; try { m = JSON.parse(data); } catch { return; }
+    if (m.type === 'vis') { ws.visible = m.visible === true; return; }
     if (m.type !== 'msg') return;
     const to = Number(m.to), text = String(m.text || '').trim().slice(0, 4000);
     if (!text || to === me.id || !q.userById.get(to)) return;
@@ -190,6 +239,9 @@ wss.on('connection', (ws) => {
     const msg = { id: Number(r.lastInsertRowid), from_id: me.id, to_id: to, text, created_at: created };
     send(to, { type: 'msg', msg });
     send(me.id, { type: 'msg', msg, cid: m.cid });
+    // push, если получатель сейчас не смотрит в приложение (iOS требует показывать каждое push-уведомление)
+    const watching = [...(online.get(to) || [])].some((w) => w.visible === true);
+    if (!watching) pushTo(to, { title: me.username, body: text.slice(0, 200), from: me.id });
   });
   ws.on('close', () => {
     online.get(me.id)?.delete(ws);

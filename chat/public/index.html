@@ -6,13 +6,18 @@
 <meta name="theme-color" content="#1f2937">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
-<title>Чат</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="DuoVerse">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>DuoVerse</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <section id="auth" hidden>
   <form id="authForm">
-    <h1>💬 Чат</h1>
+    <h1>💬 DuoVerse</h1>
     <input id="username" placeholder="Имя" autocomplete="username" required>
     <input id="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
     <input id="invite" placeholder="Код приглашения" hidden>
@@ -25,9 +30,10 @@
 <section id="app" hidden>
   <header>
     <button id="back" hidden>←</button>
-    <div><strong id="title">Чат</strong><small id="status"></small></div>
-    <button id="logout" title="Выйти">⎋</button>
+    <div><strong id="title">DuoVerse</strong><small id="status"></small></div>
+    <button id="logout" title="Выйти">Выйти</button>
   </header>
+  <div id="banner" hidden><span id="bannerText"></span><button id="bannerBtn" hidden>Включить</button></div>
   <div id="contacts"></div>
   <div id="chat" hidden>
     <div id="messages"></div>

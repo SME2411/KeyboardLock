@@ -1,8 +1,9 @@
 const $ = (id) => document.getElementById(id);
-let me, users = [], current = null, ws, onlineIds = [], oldest = 0, registering = false, retry = 0;
+let me, users = [], current = null, ws, onlineIds = [], registering = false, retry = 0;
+const unread = {};
 
-const api = async (path, opts) => {
-  const r = await fetch(path, opts && { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) });
+const api = async (path, body) => {
+  const r = await fetch(path, body && { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || 'Ошибка'), { status: r.status });
   return data;
@@ -23,42 +24,88 @@ $('authForm').onsubmit = async (e) => {
     start();
   } catch (err) { $('authErr').textContent = err.message; }
 };
-$('logout').onclick = async () => { await api('/api/logout', {}); ws?.close(); location.reload(); };
+$('logout').onclick = async () => {
+  try { const reg = await navigator.serviceWorker?.ready; const s = await reg?.pushManager.getSubscription();
+    if (s) { await api('/api/push/unsubscribe', { endpoint: s.endpoint }); await s.unsubscribe(); } } catch {}
+  await api('/api/logout', {}); ws?.close(); location.reload();
+};
 
 async function start() {
   try { me = await api('/api/me'); } catch { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth').hidden = true; $('app').hidden = false;
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   users = await api('/api/users');
   renderContacts();
   connect();
+  updateBanner();
   if (users.length === 1) openChat(users[0]);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+}
+
+// ---------- push-уведомления ----------
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent);
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+function showBanner(text, withBtn) {
+  $('banner').hidden = !text; $('bannerText').textContent = text || ''; $('bannerBtn').hidden = !withBtn;
+}
+function updateBanner() {
+  if (!pushSupported()) {
+    if (isIOS() && !isStandalone()) showBanner('Чтобы получать уведомления на iPhone: нажми «Поделиться» в Safari → «На экран «Домой»», затем открой DuoVerse с экрана.', false);
+    else showBanner('', false);
+  } else if (Notification.permission === 'granted') { showBanner('', false); subscribePush().catch(console.error); }
+  else if (Notification.permission === 'denied') showBanner('Уведомления запрещены. Разреши их в настройках телефона или браузера.', false);
+  else showBanner('Включи уведомления, чтобы не пропускать сообщения.', true);
+}
+$('bannerBtn').onclick = async () => {   // запрос разрешения обязан идти из нажатия (требование iOS)
+  const perm = await Notification.requestPermission();
+  if (perm === 'granted') { try { await subscribePush(); } catch (e) { alert('Не удалось подписаться: ' + e.message); } }
+  updateBanner();
+};
+const b64ToBytes = (b64) => Uint8Array.from(atob(b64.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64.length / 4) * 4, '=')), (c) => c.charCodeAt(0));
+async function subscribePush() {
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    const { key } = await api('/api/push/key');
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+  }
+  await api('/api/push/subscribe', sub.toJSON());   // повторная отправка безопасна: сервер обновит запись
 }
 
 // ---------- контакты ----------
+async function refreshUsers() {
+  users = await api('/api/users');
+  if (!current && users.length === 1) openChat(users[0]);
+  else { if (!current) renderContacts(); updateStatus(); }
+}
 function renderContacts() {
   $('contacts').innerHTML = '';
   if (!users.length) $('contacts').textContent = 'Пока никого нет. Пусть второй человек зарегистрируется.';
   for (const u of users) {
     const d = document.createElement('div'); d.className = 'contact';
-    d.innerHTML = `<span></span><span class="dot">${onlineIds.includes(u.id) ? '● онлайн' : ''}</span>`;
-    d.firstChild.textContent = u.username;
+    const name = document.createElement('span'); name.textContent = u.username;
+    const right = document.createElement('span');
+    if (unread[u.id]) { const b = document.createElement('span'); b.className = 'unread'; b.textContent = unread[u.id]; right.append(b, ' '); }
+    if (onlineIds.includes(u.id)) { const o = document.createElement('span'); o.className = 'dot'; o.textContent = '● онлайн'; right.append(o); }
+    d.append(name, right);
     d.onclick = () => openChat(u);
     $('contacts').append(d);
   }
 }
-$('back').onclick = () => { current = null; $('chat').hidden = true; $('contacts').hidden = false; $('back').hidden = true; $('title').textContent = 'Чат'; $('status').textContent = ''; };
+$('back').onclick = () => { current = null; $('chat').hidden = true; $('contacts').hidden = false; $('back').hidden = true; $('title').textContent = 'DuoVerse'; $('status').textContent = ''; renderContacts(); };
 
 // ---------- чат ----------
+let lastDay = '';
 async function openChat(u) {
-  current = u; $('contacts').hidden = true; $('chat').hidden = false; $('back').hidden = users.length === 1;
+  current = u; unread[u.id] = 0;
+  $('contacts').hidden = true; $('chat').hidden = false; $('back').hidden = users.length === 1;
   $('title').textContent = u.username; updateStatus();
-  $('messages').innerHTML = ''; oldest = 0;
+  $('messages').innerHTML = ''; lastDay = '';
   const list = await api('/api/messages?with=' + u.id);
-  list.forEach((m) => addMsg(m)); scrollDown();
+  list.forEach(addMsg); scrollDown();
 }
 const updateStatus = () => { if (current) $('status').textContent = onlineIds.includes(current.id) ? 'онлайн' : 'не в сети'; };
-let lastDay = '';
 function addMsg(m) {
   const box = $('messages'), d = new Date(m.created_at), day = d.toLocaleDateString('ru');
   if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; }
@@ -70,7 +117,7 @@ function addMsg(m) {
 const scrollDown = () => { $('messages').scrollTop = $('messages').scrollHeight; };
 
 $('composer').onsubmit = (e) => { e.preventDefault(); sendText(); };
-$('text').onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !/Mobi|Android/i.test(navigator.userAgent)) { e.preventDefault(); sendText(); } };
+$('text').onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !/Mobi|Android|iPhone/i.test(navigator.userAgent)) { e.preventDefault(); sendText(); } };
 function sendText() {
   const text = $('text').value.trim();
   if (!text || !current || ws?.readyState !== 1) return;
@@ -79,30 +126,30 @@ function sendText() {
 }
 
 // ---------- websocket с автопереподключением ----------
+// Сообщаем серверу, смотрим ли мы сейчас в приложение: если нет, он пришлёт push.
+const isVisible = () => !document.hidden && document.hasFocus();
+const sendVis = () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'vis', visible: isVisible() })); };
+['visibilitychange', 'focus', 'blur'].forEach((ev) => addEventListener(ev, sendVis));
+
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { retry = 0; if (current) openChat(current); }; // подтянуть пропущенное
+  ws.onopen = () => { retry = 0; sendVis(); if (current) openChat(current); };  // подтянуть пропущенное
   ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
-    if (d.type === 'presence') { onlineIds = d.online; renderContacts(); updateStatus(); }
+    if (d.type === 'presence') {
+      onlineIds = d.online;
+      // кто-то новый зарегистрировался и зашёл: обновляем список контактов
+      if (d.online.some((id) => id !== me.id && !users.some((u) => u.id === id))) refreshUsers();
+      else { if (!current) renderContacts(); updateStatus(); }
+    }
     if (d.type === 'msg') {
       const other = d.msg.from_id === me.id ? d.msg.to_id : d.msg.from_id;
-      const viewing = current?.id === other;
-      if (viewing) { addMsg(d.msg); scrollDown(); }
-      if (d.msg.from_id !== me.id && (!viewing || document.hidden)) notify(d.msg);
+      if (current?.id === other) { addMsg(d.msg); scrollDown(); }
+      else if (d.msg.from_id !== me.id) { unread[other] = (unread[other] || 0) + 1; if (!current) renderContacts(); }
     }
   };
   ws.onclose = () => { setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000)); };
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && ws?.readyState !== 1) { ws?.close(); connect(); } });
-
-function notify(m) {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') Notification.requestPermission();
-  if (Notification.permission === 'granted') {
-    const from = users.find((u) => u.id === m.from_id)?.username || 'Сообщение';
-    new Notification(from, { body: m.text, icon: '/icon.svg' });
-  }
-}
 
 start();
