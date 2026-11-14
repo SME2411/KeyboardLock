@@ -1,0 +1,20 @@
+[Unit]
+Description=DuoVerse chat
+After=network.target
+
+[Service]
+User=duoverse
+WorkingDirectory=/opt/duoverse/chat
+EnvironmentFile=/etc/duoverse.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
+Restart=always
+RestartSec=3
+# базовая изоляция
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/duoverse
+
+[Install]
+WantedBy=multi-user.target

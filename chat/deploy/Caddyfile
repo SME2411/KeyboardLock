@@ -1,0 +1,11 @@
+# Замени DOMAIN на свой домен (например duoverse.net). Caddy сам получит и продлит HTTPS-сертификат.
+DOMAIN {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	reverse_proxy 127.0.0.1:3000
+}

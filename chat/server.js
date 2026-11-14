@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';  // за Caddy слушаем только localhost
 const INVITE = process.env.INVITE_CODE || '';           // без кода регистрация закрыта
 const SECURE = process.env.COOKIE_SECURE === '1';       // включить за HTTPS
 const MAX_USERS = Number(process.env.MAX_USERS || 5);
@@ -205,4 +206,4 @@ setInterval(() => {
   }
 }, 25_000);
 
-server.listen(PORT, () => console.log(`Chat on http://localhost:${PORT} (регистрация ${INVITE ? 'по коду' : 'ЗАКРЫТА — задай INVITE_CODE'})`));
+server.listen(PORT, HOST, () => console.log(`Chat on http://${HOST}:${PORT} (регистрация ${INVITE ? 'по коду' : 'ЗАКРЫТА — задай INVITE_CODE'})`));
