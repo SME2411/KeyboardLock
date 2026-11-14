@@ -13,11 +13,13 @@ apt-get install -y ufw git curl ca-certificates debian-keyring debian-archive-ke
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
 
-# Caddy
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy.list
-sed -i 's|^deb |deb [signed-by=/usr/share/keyrings/caddy.gpg] |' /etc/apt/sources.list.d/caddy.list
-apt-get update && apt-get install -y caddy
+# Caddy (официальный способ из документации Caddy)
+rm -f /etc/apt/sources.list.d/caddy.list /usr/share/keyrings/caddy.gpg   # остатки прошлой неудачной попытки
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list
+apt-get update
+apt-get install -y caddy
+test -d /etc/caddy || { echo "Caddy не установился"; exit 1; }
 
 # пользователь и код
 id duoverse &>/dev/null || useradd --system --home /opt/duoverse --shell /usr/sbin/nologin duoverse
