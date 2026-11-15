@@ -48,6 +48,9 @@ db.exec(`
 
 try { db.exec('ALTER TABLE users ADD COLUMN last_seen INTEGER'); } catch { /* колонка уже есть */ }
 try { db.exec('ALTER TABLE messages ADD COLUMN file_id TEXT'); } catch { /* колонка уже есть */ }
+for (const stmt of ['ALTER TABLE sessions ADD COLUMN ua TEXT', 'ALTER TABLE sessions ADD COLUMN last_active INTEGER', 'ALTER TABLE push_subs ADD COLUMN sid TEXT']) {
+  try { db.exec(stmt); } catch { /* уже есть */ }
+}
 for (const col of ['display_name TEXT', 'bio TEXT', 'avatar_v INTEGER', 'cover TEXT']) {
   try { db.exec('ALTER TABLE users ADD COLUMN ' + col); } catch { /* колонка уже есть */ }
 }
@@ -62,14 +65,19 @@ const q = {
   setProfile: db.prepare('UPDATE users SET display_name = ?, bio = ?, cover = ? WHERE id = ?'),
   setAvatarV: db.prepare('UPDATE users SET avatar_v = ? WHERE id = ?'),
   touchSeen: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
-  addSession: db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)'),
+  addSession: db.prepare('INSERT INTO sessions (token, user_id, created_at, ua, last_active) VALUES (?, ?, ?, ?, ?)'),
+  touchSession: db.prepare('UPDATE sessions SET last_active = ? WHERE token = ? AND (last_active IS NULL OR last_active < ?)'),
+  sessionsOf: db.prepare('SELECT token, ua, created_at, last_active FROM sessions WHERE user_id = ? ORDER BY COALESCE(last_active, created_at) DESC'),
+  delSessionByToken: db.prepare('DELETE FROM sessions WHERE token = ? AND user_id = ?'),
+  delSubsBySid: db.prepare('DELETE FROM push_subs WHERE user_id = ? AND sid = ?'),
+  peerRead: db.prepare('SELECT last_id FROM reads WHERE user_id = ? AND peer_id = ?'),
   sessionUser: db.prepare('SELECT u.id, u.username, u.display_name, u.bio, u.avatar_v, u.cover FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
   addMsg: db.prepare('INSERT INTO messages (from_id, to_id, text, created_at) VALUES (?, ?, ?, ?)'),
   getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
   setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
-  addSub: db.prepare(`INSERT INTO push_subs (user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`),
+  addSub: db.prepare(`INSERT INTO push_subs (user_id, endpoint, p256dh, auth, created_at, sid) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, sid = excluded.sid`),
   subsOf: db.prepare('SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?'),
   delSub: db.prepare('DELETE FROM push_subs WHERE endpoint = ?'),
   history: db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.created_at,
@@ -218,11 +226,21 @@ function parseCookies(header = '') {
 }
 const userFromReq = (req) => {
   const t = parseCookies(req.headers.cookie).sid;
-  return t ? q.sessionUser.get(t) : undefined;
+  if (!t) return undefined;
+  const u = q.sessionUser.get(t);
+  if (u) { const now = Date.now(); q.touchSession.run(now, t, now - 5 * 60 * 1000); }   // «последняя активность» не чаще раза в 5 минут
+  return u;
 };
-function startSession(res, userId) {
+const sidOf = (token) => crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);   // публичный id сеанса: токен наружу не отдаём
+const reqSid = (req) => { const t = parseCookies(req.headers.cookie).sid; return t ? sidOf(t) : null; };
+function deviceLabel(ua = '') {
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : null;
+  const br = /YaBrowser/.test(ua) ? 'Яндекс Браузер' : /EdgA?\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : null;
+  return os || br ? [os, br].filter(Boolean).join(' · ') : 'Неизвестное устройство';
+}
+function startSession(res, userId, req) {
   const token = crypto.randomBytes(32).toString('hex');
-  q.addSession.run(token, userId, Date.now());
+  q.addSession.run(token, userId, Date.now(), String(req?.headers['user-agent'] || '').slice(0, 300), Date.now());
   res.setHeader('Set-Cookie',
     `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${60 * 60 * 24 * 365}${SECURE ? '; Secure' : ''}`);
 }
@@ -286,12 +304,12 @@ async function api(req, res, url) {
       if (q.userByName.get(username)) return json(res, 409, { error: 'Имя занято' });
       const salt = crypto.randomBytes(16).toString('hex');
       const r = q.addUser.run(username, salt, hashPw(password, salt), Date.now());
-      startSession(res, Number(r.lastInsertRowid));
+      startSession(res, Number(r.lastInsertRowid), req);
       return json(res, 200, { ok: true });
     }
     const u = q.userByName.get(username);
     if (!u || !safeEq(hashPw(password, u.salt), u.hash)) { noteAttempt(ip); return json(res, 401, { error: 'Неверное имя или пароль' }); }
-    startSession(res, u.id);
+    startSession(res, u.id, req);
     return json(res, 200, { ok: true });
   }
 
@@ -308,14 +326,33 @@ async function api(req, res, url) {
       const l = q.lastMsg.get(me.id, u.id);
       return { id: u.id, username: u.username, last_seen: u.last_seen, self: u.id === me.id,
         display_name: u.display_name, bio: u.bio, avatar_v: u.avatar_v, cover: u.cover,
+        peer_read: u.id === me.id ? 0 : (q.peerRead.get(u.id, me.id)?.last_id || 0),
         unread: u.id === me.id ? 0 : q.unreadCount.get(u.id, me.id).n,
         last: l ? { id: l.id, from_id: l.from_id, text: l.text, created_at: l.created_at, file: l.fmime ? { mime: l.fmime, name: l.fname } : null } : null };
     }));
   }
   if (url.pathname === '/api/read' && req.method === 'POST') {
     const b = await readJson(req), peer = Number(b.with), upto = Number(b.upto);
-    if (q.userById.get(peer) && Number.isInteger(upto) && upto > 0) q.setRead.run(me.id, peer, upto);
+    if (q.userById.get(peer) && Number.isInteger(upto) && upto > 0) {
+      q.setRead.run(me.id, peer, upto);
+      if (peer !== me.id) send(peer, { type: 'read', by: me.id, upto });   // у собеседника появятся ✓✓
+    }
     return json(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/sessions' && req.method === 'GET') {
+    const cur = reqSid(req);
+    return json(res, 200, q.sessionsOf.all(me.id).map((x) => ({ id: sidOf(x.token), device: deviceLabel(x.ua), created_at: x.created_at, last_active: x.last_active || x.created_at, current: sidOf(x.token) === cur })));
+  }
+  if (url.pathname === '/api/sessions' && req.method === 'DELETE') {   // завершить сеанс (?id=…) или все, кроме текущего (?others=1)
+    const cur = reqSid(req), target = url.searchParams.get('id'), others = url.searchParams.get('others') === '1';
+    let n = 0;
+    for (const x of q.sessionsOf.all(me.id)) {
+      const sid = sidOf(x.token);
+      if (sid === cur || !(others || sid === target)) continue;
+      q.delSessionByToken.run(x.token, me.id); q.delSubsBySid.run(me.id, sid); n++;
+      for (const w of online.get(me.id) || []) if (w.sid === sid) w.close(4001, 'revoked');   // открытое соединение того устройства закрываем
+    }
+    return json(res, 200, { ok: true, ended: n });
   }
   if (url.pathname === '/api/me' && req.method === 'PUT') {
     const b = await readJson(req);
@@ -361,7 +398,7 @@ async function api(req, res, url) {
     const b = await readJson(req);
     const ep = String(b.endpoint || ''), p = String(b.keys?.p256dh || ''), a = String(b.keys?.auth || '');
     if (!ep.startsWith('https://') || !p || !a || ep.length > 1000) return json(res, 400, { error: 'bad subscription' });
-    q.addSub.run(me.id, ep, p, a, Date.now());
+    q.addSub.run(me.id, ep, p, a, Date.now(), reqSid(req));
     return json(res, 200, { ok: true });
   }
   if (url.pathname === '/api/push/unsubscribe' && req.method === 'POST') {
@@ -382,7 +419,7 @@ server.on('upgrade', (req, socket, head) => {
   // защита от чужих сайтов: Origin должен совпадать с Host
   const sameOrigin = !origin || new URL(origin).host === req.headers.host;
   if (url.pathname !== '/ws' || !me || !sameOrigin) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
-  wss.handleUpgrade(req, socket, head, (ws) => { ws.user = me; wss.emit('connection', ws); });
+  wss.handleUpgrade(req, socket, head, (ws) => { ws.user = me; ws.sid = reqSid(req); wss.emit('connection', ws); });
 });
 
 const ACTIONS = new Set(['typing', 'voice', 'video', 'photo', 'file']);

@@ -99,7 +99,7 @@ button.who { background: none; border: 0; padding: 0; }
 .day { align-self: center; color: var(--text); font-size: .78em; margin: 10px 0 6px; padding: 4px 12px; border-radius: 14px; background: color-mix(in srgb, var(--bg) 75%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 
 /* ---------- сообщения (Telegram+: «хвостики», время в строке) ---------- */
-.msg { position: relative; width: fit-content; align-self: flex-start; max-width: 80%; padding: 7px 12px 6px; border-radius: 17px; white-space: pre-wrap; overflow-wrap: anywhere;
+.msg { position: relative; width: fit-content; align-self: flex-start; max-width: 80%; padding: 7px 12px 6px; border-radius: var(--r, 17px); white-space: pre-wrap; overflow-wrap: anywhere;
   background: var(--bubble); color: var(--text); box-shadow: 0 1px 1.5px rgba(0,0,0,.12); margin-top: 6px; }
 .msg.me { align-self: flex-end; background: var(--me); color: var(--me-text); }
 .msg.cont { margin-top: 0; }
@@ -203,3 +203,11 @@ label.fld input, label.fld textarea { color: var(--text); font-size: 1rem; }
 label.fld textarea { resize: none; }
 .rowbtn { display: flex; gap: 10px; padding: 10px 16px; }
 .rowbtn > * { flex: 1; }
+
+/* галочки, черновик, устройства */
+.tick { letter-spacing: -2px; font-size: .95em; margin-left: 1px; opacity: .8; }
+.tick.read { opacity: 1; color: color-mix(in srgb, var(--me-text) 60%, #3b9cff); }
+.msg.media .tick.read { color: color-mix(in srgb, var(--text) 60%, #3b9cff); }
+.draft { color: var(--danger); font-weight: 500; }
+.contact.active .draft { color: inherit; }
+.dev small { margin-top: 2px; }

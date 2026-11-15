@@ -21,7 +21,7 @@
   d.dataset.mode = dark ? 'dark' : 'light'; d.dataset.style = s.style || 'graphite';
   d.dataset.anim = s.anim || 'full'; d.dataset.wall = s.wall || 'doodle'; d.dataset.emojiAnim = s.emojiAnim === false ? 'off' : 'on'; d.dataset.fs = s.fontSize || 'm';
   var w = s.wall === 'custom' ? localStorage.getItem('duoverse.wallpaperImg') : null; if (w) d.style.setProperty('--wall-custom', 'url(' + w + ')');
-  d.style.setProperty('--wall-dim', (s.wallDim || 0) / 100); d.style.setProperty('--wall-blur', (s.wallBlur ? 8 : 0) + 'px');
+  d.style.setProperty('--r', (s.radius || 17) + 'px'); d.style.setProperty('--wall-dim', (s.wallDim || 0) / 100); d.style.setProperty('--wall-blur', (s.wallBlur ? 8 : 0) + 'px');
 })();
 </script>
 <link rel="stylesheet" href="/style.css">

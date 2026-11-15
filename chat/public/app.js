@@ -1,5 +1,6 @@
 import { THEMES } from '/themes.js';
 const $ = (id) => document.getElementById(id);
+const drafts = JSON.parse(localStorage.getItem('duoverse.drafts') || '{}');
 let me, chats = [], current = null, ws, onlineIds = [], registering = false, retry = 0, actTimer = null, lastActSent = 0;
 
 const api = (path, body) => apiReq(body ? 'POST' : 'GET', path, body);
@@ -11,7 +12,7 @@ const apiReq = async (method, path, body) => {
 };
 
 // ---------- настройки (хранятся на устройстве) ----------
-const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true, compress: true, wall: 'doodle', wallDim: 0, wallBlur: false };
+const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true, compress: true, wall: 'doodle', wallDim: 0, wallBlur: false, radius: 17 };
 let settings = { ...DEFAULTS };
 try { settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('duoverse.settings') || '{}') }; } catch {}
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
@@ -22,6 +23,7 @@ function applySettings() {
   r.dataset.emojiAnim = settings.emojiAnim ? 'on' : 'off'; r.dataset.fs = settings.fontSize; r.dataset.wall = settings.wall;
   const img = settings.wall === 'custom' ? localStorage.getItem('duoverse.wallpaperImg') : null;
   if (img) r.style.setProperty('--wall-custom', `url(${img})`); else r.style.removeProperty('--wall-custom');
+  r.style.setProperty('--r', settings.radius + 'px');
   r.style.setProperty('--wall-dim', settings.wallDim / 100); r.style.setProperty('--wall-blur', (settings.wallBlur ? 8 : 0) + 'px');
   $('themeColor').content = getComputedStyle(r).getPropertyValue('--bg').trim() || '#ffffff';
 }
@@ -76,6 +78,9 @@ function openSettings() {
   }
   renderThemes();
   segRow(sh, 'fontSize', 'Размер текста', [['s', 'Мелкий'], ['m', 'Обычный'], ['l', 'Крупный']]);
+  const rrow = mk('div', 'row'); rrow.append(mk('div', '', 'Скругление сообщений'));
+  const rr = document.createElement('input'); rr.type = 'range'; rr.min = 4; rr.max = 26; rr.value = settings.radius;
+  rr.oninput = () => setSetting('radius', Number(rr.value)); rrow.append(rr); sh.append(rrow);
 
   section(sh, 'Обои чата');
   const wgrid = mk('div', 'walls'); sh.append(wgrid);
@@ -115,6 +120,18 @@ function openSettings() {
   section(sh, 'Уведомления и аккаунт');
   const nrow = mk('div', 'row inline'), nl = mk('div', '', 'Push-уведомления'), nh = mk('small'); nl.append(nh);
   const nb = mk('button', 'btn'); nrow.append(nl, nb); sh.append(nrow); refreshPushRow(nh, nb);
+  const drow2 = mk('div', 'row inline'); drow2.append(mk('div', '', 'Устройства'));
+  const db = mk('button', 'btn', 'Открыть'); db.onclick = openDevices; drow2.append(db); sh.append(drow2);
+  const srow = mk('div', 'row inline'), sl = mk('div', '', 'Данные на устройстве'), sn = mk('small', '', 'считаем…'); sl.append(sn);
+  const sb = mk('button', 'btn', 'Очистить'); srow.append(sl, sb); sh.append(srow);
+  localUsage().then((t) => { sn.textContent = t; });
+  sb.onclick = async () => {
+    if (!confirm('Удалить фон-фото, недавние эмодзи и черновики на этом устройстве? Вход и настройки останутся.')) return;
+    localStorage.removeItem('duoverse.wallpaperImg'); localStorage.removeItem('recentEmoji'); localStorage.removeItem('duoverse.drafts');
+    if (settings.wall === 'custom') setSetting('wall', 'doodle');
+    try { for (const k of await caches.keys()) await caches.delete(k); } catch {}
+    Object.keys(drafts).forEach((k) => delete drafts[k]); renderChats(); sn.textContent = await localUsage();
+  };
   const prow = mk('div', 'row inline'); prow.append(mk('div', '', 'Мой профиль'));
   const pb = mk('button', 'btn', 'Открыть'); pb.onclick = openProfile; prow.append(pb); sh.append(prow);
   const arow = mk('div', 'row inline'); arow.append(mk('div', '', 'Вы вошли как ' + me.username));
@@ -137,6 +154,41 @@ async function resizeImage(file, max, quality, square) {
 async function resizeToDataUrl(file, max, quality) {
   const blob = await resizeImage(file, max, quality, false);
   return await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+}
+
+// ---------- устройства (сеансы) ----------
+async function localUsage() {
+  let bytes = 0; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); bytes += (k.length + (localStorage.getItem(k) || '').length) * 2; }
+  let est = ''; try { const e = await navigator.storage?.estimate?.(); if (e?.usage) est = ` · браузерный кэш ≈ ${fmtSize(e.usage)}`; } catch {}
+  return `${fmtSize(bytes)} в приложении${est}`;
+}
+const ago = (ts) => {
+  const m = Math.round((Date.now() - ts) / 60000);
+  if (m < 2) return 'сейчас'; if (m < 60) return `${m} мин назад`;
+  const d = new Date(ts), now = new Date(), t = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return `сегодня в ${t}`;
+  if (new Date(now - 864e5).toDateString() === d.toDateString()) return `вчера в ${t}`;
+  return d.toLocaleDateString('ru', { day: 'numeric', month: 'long' });
+};
+async function openDevices() {
+  const sh = openSheet('Устройства');
+  const list = await api('/api/sessions');
+  sh.append(mk('div', 'prof-sub', 'Здесь все устройства, где выполнен вход в ваш аккаунт. Незнакомое можно завершить.'));
+  const wrap = mk('div', 'devs'); sh.append(wrap);
+  for (const d of list) {
+    const row = mk('div', 'row inline dev');
+    const lab = mk('div', '', d.device + (d.current ? '  (это устройство)' : '')); lab.append(mk('small', '', 'активность: ' + ago(d.last_active)));
+    row.append(lab);
+    if (!d.current) {
+      const b = mk('button', 'btn danger', 'Завершить'); b.onclick = async () => { await apiReq('DELETE', '/api/sessions?id=' + d.id); openDevices(); }; row.append(b);
+    }
+    wrap.append(row);
+  }
+  if (list.length > 1) {
+    const rb = mk('div', 'rowbtn'); const all = mk('button', 'btn danger', 'Завершить все остальные'); all.onclick = async () => { if (confirm('Выйти со всех устройств, кроме этого?')) { await apiReq('DELETE', '/api/sessions?others=1'); openDevices(); } };
+    rb.append(all); sh.append(rb);
+  }
+  sh.append(mk('div', 'pad'));
 }
 
 // ---------- профиль ----------
@@ -267,7 +319,7 @@ const BOT_WELCOME = [
   'Внешний вид, тема и анимации настраиваются кнопкой ⚙ в списке чатов.',
 ];
 const botChat = () => ({ id: -1, username: 'DuoVerse', name: 'DuoVerse', kind: 'bot', unread: localStorage.getItem('welcomeSeen') ? 0 : 1, last: null });
-const toChat = (u) => ({ ...u, kind: u.self ? 'self' : 'user', name: u.self ? 'Избранное' : (u.display_name || u.username) });
+const toChat = (u) => ({ ...u, peerRead: u.peer_read || 0, kind: u.self ? 'self' : 'user', name: u.self ? 'Избранное' : (u.display_name || u.username) });
 async function loadChats() {
   const list = await api('/api/chats');
   chats = [...list.map(toChat), botChat()];
@@ -348,6 +400,7 @@ async function subscribePush() {
 const fileLabel = (mime, name) => mime.startsWith('image/') ? '📷 Фото' : mime.startsWith('video/') ? '🎬 Видео' : mime.startsWith('audio/') ? '🎵 Аудио' : '📎 ' + name;
 function previewOf(c) {
   if (c.kind === 'bot') return 'Как пользоваться DuoVerse';
+  if (drafts[c.id] && current?.id !== c.id) return null;   // черновик показываем отдельным оформлением
   if (c.kind === 'user' && activeAction(c.id)) return ACTION_TEXT[activeAction(c.id)] + '…';
   if (!c.last) return c.kind === 'self' ? 'Заметки, ссылки и файлы для себя' : 'Сообщений пока нет';
   const l = c.last, body = l.file ? fileLabel(l.file.mime, l.file.name) + (l.text ? ' ' + l.text : '') : l.text;
@@ -372,7 +425,10 @@ function renderChats() {
     const b = document.createElement('b'); b.textContent = c.name; const tm = document.createElement('time'); tm.textContent = listTime(c.last?.created_at);
     l1.append(b, tm);
     const l2 = document.createElement('div'); l2.className = 'l2';
-    const pv = document.createElement('span'); pv.className = 'pv' + (c.kind === 'user' && activeAction(c.id) ? ' live' : ''); pv.textContent = previewOf(c); l2.append(pv);
+    const pv = document.createElement('span'); pv.className = 'pv' + (c.kind === 'user' && activeAction(c.id) ? ' live' : '');
+    const pt = previewOf(c);
+    if (pt === null) { const dl = mk('span', 'draft', 'Черновик: '); pv.append(dl, drafts[c.id].slice(0, 80)); } else pv.textContent = pt;
+    l2.append(pv);
     if (c.unread) { const u = document.createElement('span'); u.className = 'unread'; u.textContent = c.unread; l2.append(u); }
     meta.append(l1, l2); d.append(av, meta);
     d.onclick = () => openChat(c);
@@ -397,6 +453,7 @@ async function openChat(c) {
   setAvatar($('avatar'), c); $('title').textContent = c.name; updateStatus();
   const bot = c.kind === 'bot';
   $('composer').hidden = bot; $('readonly').hidden = !bot; if (bot) $('emoji').hidden = true;
+  ta.value = bot ? '' : (drafts[c.id] || ''); autosize();
   $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear(); lastRendered = 0;
   if (bot) {
     if (!localStorage.getItem('welcomeTime')) localStorage.setItem('welcomeTime', Date.now());
@@ -437,14 +494,28 @@ function addMsg(m, animate = true) {
     if (m.text) { const c = document.createElement('div'); c.className = 'cap'; c.textContent = m.text; el.append(c); }
   } else el.textContent = m.text;
   const t = document.createElement('time'); t.textContent = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
-  el.append(t); box.append(el);
+  el.dataset.mid = m.id;
+  if (m.from_id === me.id && current?.kind === 'user') { const k = mk('span', 'tick', ''); t.append(' ', k); }
+  el.append(t); box.append(el); updateTicks();
+}
+function updateTicks() {   // ✓ отправлено, ✓✓ прочитано собеседником
+  if (current?.kind !== 'user') return;
+  for (const k of document.querySelectorAll('.msg.me .tick')) {
+    const read = Number(k.closest('.msg').dataset.mid) <= (current.peerRead || 0);
+    k.textContent = read ? '✓✓' : '✓'; k.classList.toggle('read', read);
+  }
 }
 const scrollDown = (smooth = true) => { const b = $('messages'); b.style.scrollBehavior = smooth ? 'smooth' : 'auto'; b.scrollTop = b.scrollHeight; };
 
 // ---------- ввод ----------
 const ta = $('text');
 function syncSend() { $('sendBtn').classList.toggle('idle', !ta.value.trim()); }
-function autosize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; syncSend(); }
+function autosize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; syncSend(); saveDraft(); }
+function saveDraft() {   // черновик у каждого чата свой, переживает перезагрузку
+  if (!current || current.kind === 'bot') return;
+  const t = ta.value; if (t.trim()) drafts[current.id] = t; else delete drafts[current.id];
+  localStorage.setItem('duoverse.drafts', JSON.stringify(drafts));
+}
 ta.addEventListener('input', () => { autosize(); sendAction('typing'); });
 $('composer').onsubmit = (e) => { e.preventDefault(); sendText(); };
 ta.onkeydown = (e) => {
@@ -455,7 +526,7 @@ function sendText() {
   const text = ta.value.trim();
   if (!text || !current || current.kind === 'bot' || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
-  ta.value = ''; autosize(); ta.focus();
+  ta.value = ''; delete drafts[current.id]; autosize(); ta.focus();
 }
 
 // ---------- файлы ----------
@@ -615,6 +686,9 @@ function connect() {
       if (d.left) { const u = chats.find((x) => x.id === d.left.id); if (u) u.last_seen = d.left.at; }
       if (d.online.some((id) => !chats.some((c) => c.id === id))) refreshChats();   // зарегистрировался новый участник
       else { renderChats(); updateStatus(); }
+    }
+    if (d.type === 'read') {   // собеседник прочитал наши сообщения
+      const c = chats.find((x) => x.id === d.by); if (c) { c.peerRead = Math.max(c.peerRead || 0, d.upto); if (current?.id === c.id) updateTicks(); }
     }
     if (d.type === 'profile') {   // кто-то поменял имя, фото или «о себе»
       const u = d.user;
