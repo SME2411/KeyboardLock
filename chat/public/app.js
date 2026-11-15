@@ -1,7 +1,5 @@
 const $ = (id) => document.getElementById(id);
-let me, users = [], current = null, ws, onlineIds = [], registering = false, retry = 0, actTimer = null, lastActSent = 0;
-const unread = {};
-let activity = null;   // { from, kind, until }
+let me, chats = [], current = null, ws, onlineIds = [], registering = false, retry = 0, actTimer = null, lastActSent = 0;
 
 const api = async (path, body) => {
   const r = await fetch(path, body && { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -127,16 +125,38 @@ async function start() {
   try { me = await api('/api/me'); } catch { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth').hidden = true; $('app').hidden = false;
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-  users = await api('/api/users');
-  renderContacts();
+  await loadChats();
   connect();
   updateBanner();
   buildEmoji();
-  if (users.length === 1) openChat(users[0]);
 }
 
+// ---------- чаты: собеседники, «Избранное» (чат с собой), служебный «DuoVerse» ----------
+const BOT_WELCOME = [
+  'Добро пожаловать в DuoVerse 👋\nЭто ваш личный мессенджер на двоих: без посторонних и без рекламы.',
+  'Что здесь умеет:\n• сообщения в реальном времени\n• фото, видео, аудио и файлы до 100 МБ\n• эмодзи и статусы «в сети», «печатает…»\n• уведомления, даже когда приложение закрыто',
+  '«Избранное» — чат с самим собой для заметок, ссылок и файлов. Там удобно пробовать любые функции.',
+  'Уведомления на iPhone: в Safari нажмите «Поделиться» → «На экран «Домой»», затем открывайте DuoVerse с экрана.',
+  'Внешний вид, тема и анимации настраиваются кнопкой ⚙ в списке чатов.',
+];
+const botChat = () => ({ id: -1, username: 'DuoVerse', name: 'DuoVerse', kind: 'bot', unread: localStorage.getItem('welcomeSeen') ? 0 : 1, last: null });
+const toChat = (u) => ({ ...u, kind: u.self ? 'self' : 'user', name: u.self ? 'Избранное' : u.username });
+async function loadChats() {
+  const list = await api('/api/chats');
+  chats = [...list.map(toChat), botChat()];
+  if (current) current = chats.find((c) => c.id === current.id) || current;
+  renderChats(); updateStatus();
+}
+const refreshChats = loadChats;
+
 // ---------- аватарки ----------
-function setAvatar(el, name, on) { el.textContent = name[0].toUpperCase(); el.classList.toggle('on', !!on); }
+const BOOKMARK = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/></svg>';
+function setAvatar(el, c) {
+  el.className = 'avatar'; el.textContent = '';
+  if (c.kind === 'self') { el.classList.add('ic'); el.innerHTML = BOOKMARK; }
+  else if (c.kind === 'bot') { el.classList.add('mono-av'); el.textContent = 'D'; }
+  else { el.textContent = c.username[0].toUpperCase(); el.classList.toggle('on', onlineIds.includes(c.id)); }
+}
 
 // ---------- статус: в сети / был(а) / действие ----------
 const ACTION_TEXT = { typing: 'печатает', voice: 'записывает голосовое', video: 'записывает видео', photo: 'отправляет фото', file: 'отправляет файл' };
@@ -149,16 +169,19 @@ function seenText(u) {
   if (new Date(now - 864e5).toDateString() === d.toDateString()) return `был(а) вчера в ${t}`;
   return `был(а) ${d.toLocaleDateString('ru', { day: 'numeric', month: 'short' })}`;
 }
+let activity = null;   // { from, kind, until }
 const activeAction = (uid) => (activity && activity.from === uid && Date.now() < activity.until) ? activity.kind : null;
 function updateStatus() {
   if (!current) return;
-  const st = $('status'), act = activeAction(current.id);
+  const st = $('status'), act = current.kind === 'user' ? activeAction(current.id) : null;
+  if (current.kind === 'self') { st.textContent = 'заметки и файлы для себя'; st.className = ''; return; }
+  if (current.kind === 'bot') { st.textContent = 'служебный чат'; st.className = ''; return; }
   $('avatar').classList.toggle('on', onlineIds.includes(current.id));
   if (act) { st.textContent = ACTION_TEXT[act]; st.className = 'live dots'; }
   else { st.textContent = seenText(current); st.className = onlineIds.includes(current.id) ? 'live' : ''; }
 }
-function sendAction(kind) {   // не чаще раза в 2.5 секунды
-  if (!current || ws?.readyState !== 1 || Date.now() - lastActSent < 2500) return;
+function sendAction(kind) {   // не чаще раза в 2.5 секунды; себе и боту не шлём
+  if (!current || current.kind !== 'user' || ws?.readyState !== 1 || Date.now() - lastActSent < 2500) return;
   if (kind === 'typing' && !settings.showTyping) return;
   lastActSent = Date.now(); ws.send(JSON.stringify({ type: 'act', to: current.id, kind }));
 }
@@ -193,44 +216,76 @@ async function subscribePush() {
   await api('/api/push/subscribe', sub.toJSON());
 }
 
-// ---------- контакты ----------
-async function refreshUsers() {
-  users = await api('/api/users');
-  if (!current && users.length === 1) openChat(users[0]);
-  else { if (!current) renderContacts(); updateStatus(); }
+// ---------- список чатов ----------
+const fileLabel = (mime, name) => mime.startsWith('image/') ? '📷 Фото' : mime.startsWith('video/') ? '🎬 Видео' : mime.startsWith('audio/') ? '🎵 Аудио' : '📎 ' + name;
+function previewOf(c) {
+  if (c.kind === 'bot') return 'Как пользоваться DuoVerse';
+  if (c.kind === 'user' && activeAction(c.id)) return ACTION_TEXT[activeAction(c.id)] + '…';
+  if (!c.last) return c.kind === 'self' ? 'Заметки, ссылки и файлы для себя' : 'Сообщений пока нет';
+  const l = c.last, body = l.file ? fileLabel(l.file.mime, l.file.name) + (l.text ? ' ' + l.text : '') : l.text;
+  return (l.from_id === me.id && c.kind === 'user' ? 'Вы: ' : '') + body;
 }
-function renderContacts() {
+function listTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts), now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  if (now - d < 6 * 864e5) return d.toLocaleDateString('ru', { weekday: 'short' });
+  return d.toLocaleDateString('ru', { day: '2-digit', month: '2-digit' });
+}
+function renderChats() {
   const box = $('contacts'); box.innerHTML = '';
-  if (!users.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'Пока никого нет. Пусть второй человек зарегистрируется.'; box.append(d); }
-  users.forEach((u, i) => {
-    const d = document.createElement('div'); d.className = 'contact'; d.style.animationDelay = i * 50 + 'ms';
-    const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, u.username, onlineIds.includes(u.id));
+  const order = { user: 0, self: 1, bot: 2 };
+  const list = [...chats].sort((a, b) => order[a.kind] - order[b.kind] || (b.last?.created_at || 0) - (a.last?.created_at || 0));
+  list.forEach((c, i) => {
+    const d = document.createElement('div'); d.className = 'contact' + (current?.id === c.id ? ' active' : ''); d.style.animationDelay = i * 40 + 'ms';
+    const av = document.createElement('div'); setAvatar(av, c);
     const meta = document.createElement('div'); meta.className = 'meta';
-    const b = document.createElement('b'); b.textContent = u.username; const sm = document.createElement('small'); sm.textContent = seenText(u);
-    meta.append(b, sm); d.append(av, meta);
-    if (unread[u.id]) { const c = document.createElement('span'); c.className = 'unread'; c.textContent = unread[u.id]; d.append(c); }
-    d.onclick = () => openChat(u);
+    const l1 = document.createElement('div'); l1.className = 'l1';
+    const b = document.createElement('b'); b.textContent = c.name; const tm = document.createElement('time'); tm.textContent = listTime(c.last?.created_at);
+    l1.append(b, tm);
+    const l2 = document.createElement('div'); l2.className = 'l2';
+    const pv = document.createElement('span'); pv.className = 'pv' + (c.kind === 'user' && activeAction(c.id) ? ' live' : ''); pv.textContent = previewOf(c); l2.append(pv);
+    if (c.unread) { const u = document.createElement('span'); u.className = 'unread'; u.textContent = c.unread; l2.append(u); }
+    meta.append(l1, l2); d.append(av, meta);
+    d.onclick = () => openChat(c);
     box.append(d);
   });
+  if (!chats.some((c) => c.kind === 'user')) {
+    const h = document.createElement('div'); h.className = 'hint';
+    h.textContent = 'Второй участник ещё не зарегистрировался. Как только он войдёт по коду приглашения, чат появится здесь.'; box.append(h);
+  }
 }
 $('back').onclick = () => {
-  current = null; $('chat').hidden = true; $('contacts').hidden = false; $('back').hidden = true; $('avatar').hidden = true;
-  $('title').textContent = 'DuoVerse'; $('status').textContent = ''; $('emoji').hidden = true; $('emojiBtn').textContent = '😊'; renderContacts();
+  current = null; $('app').dataset.view = 'list'; $('chat').hidden = true; $('empty').hidden = false;
+  $('emoji').hidden = true; $('emojiBtn').textContent = '😊'; renderChats();
 };
 
 // ---------- чат ----------
-let lastDay = '', lastFrom = null, lastTime = 0, openSeq = 0;
+let lastDay = '', lastFrom = null, lastTime = 0, openSeq = 0, lastRendered = 0;
 const seen = new Set();   // id уже показанных сообщений: защита от дублей
-async function openChat(u) {
+async function openChat(c) {
   const my = ++openSeq;
-  current = u; unread[u.id] = 0;
-  $('contacts').hidden = true; $('chat').hidden = false; $('back').hidden = users.length === 1;
-  $('avatar').hidden = false; setAvatar($('avatar'), u.username, onlineIds.includes(u.id));
-  $('title').textContent = u.username; updateStatus();
-  $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear();
-  const list = await api('/api/messages?with=' + u.id);
+  current = c; $('app').dataset.view = 'chat'; $('empty').hidden = true; $('chat').hidden = false;
+  setAvatar($('avatar'), c); $('title').textContent = c.name; updateStatus();
+  const bot = c.kind === 'bot';
+  $('composer').hidden = bot; $('readonly').hidden = !bot; if (bot) $('emoji').hidden = true;
+  $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear(); lastRendered = 0;
+  if (bot) {
+    if (!localStorage.getItem('welcomeTime')) localStorage.setItem('welcomeTime', Date.now());
+    const t0 = Number(localStorage.getItem('welcomeTime'));
+    BOT_WELCOME.forEach((text, i) => addMsg({ id: -(i + 1), from_id: -1, to_id: me.id, text, created_at: t0 + i * 1000 }, false));
+    localStorage.setItem('welcomeSeen', '1'); c.unread = 0; renderChats(); scrollDown(false); return;
+  }
+  renderChats();
+  const list = await api('/api/messages?with=' + c.id);
   if (my !== openSeq) return;   // за время загрузки чат открыли заново: этот ответ устарел
   list.forEach((m) => addMsg(m, false)); scrollDown(false);
+  markRead(c);
+}
+function markRead(c) {
+  if (c.kind !== 'user' || !isVisible()) return;
+  const mine = lastRendered; if (!mine) return;
+  if (c.unread || c.readUpto !== mine) { c.readUpto = mine; c.unread = 0; api('/api/read', { with: c.id, upto: mine }).catch(() => {}); renderChats(); }
 }
 const segmenter = 'Segmenter' in Intl ? new Intl.Segmenter() : null;
 function isBigEmoji(text) {
@@ -241,7 +296,7 @@ function isBigEmoji(text) {
 }
 function addMsg(m, animate = true) {
   if (seen.has(m.id)) return;
-  seen.add(m.id);
+  seen.add(m.id); if (m.id > lastRendered) lastRendered = m.id;
   const box = $('messages'), d = new Date(m.created_at), day = d.toLocaleDateString('ru', { day: 'numeric', month: 'long' });
   if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; lastFrom = null; }
   const cont = lastFrom === m.from_id && m.created_at - lastTime < 2 * 60 * 1000;
@@ -270,7 +325,7 @@ ta.onkeydown = (e) => {
 };
 function sendText() {
   const text = ta.value.trim();
-  if (!text || !current || ws?.readyState !== 1) return;
+  if (!text || !current || current.kind === 'bot' || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
   ta.value = ''; autosize(); ta.focus();
 }
@@ -366,7 +421,7 @@ async function uploadOne(file) {
 }
 let uploading = Promise.resolve();
 function sendFiles(files) {
-  if (!current) return;
+  if (!current || current.kind === 'bot') return;
   for (const f of files) uploading = uploading.then(() => uploadOne(f)).catch(console.error);   // по очереди
 }
 $('attachBtn').onclick = () => $('fileInput').click();
@@ -429,26 +484,34 @@ function connect() {
     if (d.type === 'presence') {
       onlineIds = d.online;
       if (activity && !onlineIds.includes(activity.from)) activity = null;   // человек вышел: «печатает» гасим сразу
-      if (d.left) { const u = users.find((x) => x.id === d.left.id); if (u) u.last_seen = d.left.at; }
-      if (d.online.some((id) => id !== me.id && !users.some((u) => u.id === id))) refreshUsers();
-      else { if (!current) renderContacts(); updateStatus(); }
+      if (d.left) { const u = chats.find((x) => x.id === d.left.id); if (u) u.last_seen = d.left.at; }
+      if (d.online.some((id) => !chats.some((c) => c.id === id))) refreshChats();   // зарегистрировался новый участник
+      else { renderChats(); updateStatus(); }
     }
     if (d.type === 'act') {
-      activity = { from: d.from, kind: d.kind, until: Date.now() + 3500 }; updateStatus();
-      clearTimeout(actTimer); actTimer = setTimeout(updateStatus, 3600);
+      activity = { from: d.from, kind: d.kind, until: Date.now() + 3500 }; updateStatus(); renderChats();
+      clearTimeout(actTimer); actTimer = setTimeout(() => { updateStatus(); renderChats(); }, 3600);
     }
     if (d.type === 'msg') {
-      const other = d.msg.from_id === me.id ? d.msg.to_id : d.msg.from_id;
+      const m = d.msg, other = m.from_id === me.id ? m.to_id : m.from_id, c = chats.find((x) => x.id === other && x.kind !== 'bot');
+      if (!c) { refreshChats(); return; }
+      c.last = { id: m.id, from_id: m.from_id, text: m.text, created_at: m.created_at, file: m.file ? { mime: m.file.mime, name: m.file.name } : null };
+      const incoming = m.from_id !== me.id;
+      if (incoming && activity?.from === other) activity = null;   // сообщение пришло: «печатает…» больше не нужно
       if (current?.id === other) {
-        activity = null; updateStatus();
+        if (incoming) updateStatus();
         const nearBottom = $('messages').scrollHeight - $('messages').scrollTop - $('messages').clientHeight < 160;
-        addMsg(d.msg); if (nearBottom || d.msg.from_id === me.id) scrollDown();
-      } else if (d.msg.from_id !== me.id) { unread[other] = (unread[other] || 0) + 1; if (!current) renderContacts(); }
+        addMsg(m); if (nearBottom || !incoming) scrollDown();
+        if (incoming) { if (isVisible()) markRead(c); else c.unread = (c.unread || 0) + 1; }
+      } else if (incoming) c.unread = (c.unread || 0) + 1;
+      renderChats();
     }
   };
   ws.onclose = () => { setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000)); };
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && ws?.readyState !== 1) { ws?.close(); connect(); } });
+addEventListener('focus', () => { if (current) markRead(current); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && current) markRead(current); });
 
 syncSend();
 start();

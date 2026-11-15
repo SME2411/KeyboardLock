@@ -39,33 +39,42 @@
   </form>
 </section>
 
-<section id="app" hidden>
-  <header>
-    <button id="back" class="icon-btn" aria-label="Назад" hidden>←</button>
-    <div id="avatar" class="avatar" hidden></div>
-    <div class="who"><strong id="title">DuoVerse</strong><small id="status"></small></div>
-    <button id="settingsBtn" class="icon-btn" aria-label="Настройки">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
-    </button>
-  </header>
-  <div id="banner" hidden><span id="bannerText"></span><button id="bannerBtn" hidden>Включить</button></div>
-  <div id="contacts"></div>
-  <div id="chat" hidden>
-    <div id="messages"></div>
-    <div id="emoji" hidden>
-      <div id="emojiTabs"></div>
-      <div id="emojiGrid"></div>
-    </div>
-    <form id="composer">
-      <button type="button" id="attachBtn" class="icon-btn" aria-label="Прикрепить файл">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5 12.6 20a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg>
+<section id="app" hidden data-view="list">
+  <aside id="side">
+    <header class="top">
+      <strong class="brand">DuoVerse</strong>
+      <button id="settingsBtn" class="icon-btn" aria-label="Настройки">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
       </button>
-      <input type="file" id="fileInput" multiple hidden>
-      <button type="button" id="emojiBtn" class="icon-btn" aria-label="Эмодзи">😊</button>
-      <textarea id="text" rows="1" placeholder="Сообщение…" maxlength="4000"></textarea>
-      <button type="submit" id="sendBtn" aria-label="Отправить"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6l-.01 6.5L15 12 3.39 13.9z"/></svg></button>
-    </form>
-  </div>
+    </header>
+    <div id="banner" hidden><span id="bannerText"></span><button id="bannerBtn" hidden>Включить</button></div>
+    <div id="contacts"></div>
+  </aside>
+  <main id="main">
+    <div id="empty"><div class="mono">D</div><p>Выберите чат, чтобы начать общение</p></div>
+    <div id="chat" hidden>
+      <header class="top">
+        <button id="back" class="icon-btn" aria-label="Назад">←</button>
+        <div id="avatar" class="avatar"></div>
+        <div class="who"><strong id="title"></strong><small id="status"></small></div>
+      </header>
+      <div id="messages"></div>
+      <div id="emoji" hidden>
+        <div id="emojiTabs"></div>
+        <div id="emojiGrid"></div>
+      </div>
+      <form id="composer">
+        <button type="button" id="attachBtn" class="icon-btn" aria-label="Прикрепить файл">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5 12.6 20a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg>
+        </button>
+        <input type="file" id="fileInput" multiple hidden>
+        <button type="button" id="emojiBtn" class="icon-btn" aria-label="Эмодзи">😊</button>
+        <textarea id="text" rows="1" placeholder="Сообщение…" maxlength="4000"></textarea>
+        <button type="submit" id="sendBtn" aria-label="Отправить"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6l-.01 6.5L15 12 3.39 13.9z"/></svg></button>
+      </form>
+      <div id="readonly" hidden>Служебный чат: здесь можно только читать</div>
+    </div>
+  </main>
 </section>
 
 <div id="lightbox" hidden><img alt=""><a id="lbDl" download>Скачать</a></div>

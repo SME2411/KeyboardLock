@@ -36,6 +36,7 @@ db.exec(`
     text TEXT NOT NULL, created_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_id, to_id, id);
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS reads (user_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, last_id INTEGER NOT NULL, PRIMARY KEY (user_id, peer_id));
   CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, to_id INTEGER NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
     size INTEGER NOT NULL, w INTEGER, h INTEGER, created_at INTEGER NOT NULL);
@@ -69,6 +70,13 @@ const q = {
     FROM messages m LEFT JOIN files f ON f.id = m.file_id
     WHERE ((m.from_id = ?1 AND m.to_id = ?2) OR (m.from_id = ?2 AND m.to_id = ?1)) AND (?3 = 0 OR m.id < ?3)
     ORDER BY m.id DESC LIMIT 50`),
+  lastMsg: db.prepare(`SELECT m.id, m.from_id, m.text, m.created_at, f.mime AS fmime, f.name AS fname
+    FROM messages m LEFT JOIN files f ON f.id = m.file_id
+    WHERE (m.from_id = ?1 AND m.to_id = ?2) OR (m.from_id = ?2 AND m.to_id = ?1) ORDER BY m.id DESC LIMIT 1`),
+  unreadCount: db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE from_id = ?1 AND to_id = ?2
+    AND id > COALESCE((SELECT last_id FROM reads WHERE user_id = ?2 AND peer_id = ?1), 0)`),
+  setRead: db.prepare(`INSERT INTO reads (user_id, peer_id, last_id) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, peer_id) DO UPDATE SET last_id = MAX(last_id, excluded.last_id)`),
   addFile: db.prepare('INSERT INTO files (id, owner_id, to_id, name, mime, size, w, h, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   addFileMsg: db.prepare('INSERT INTO messages (from_id, to_id, text, created_at, file_id) VALUES (?, ?, ?, ?, ?)'),
   fileById: db.prepare('SELECT * FROM files WHERE id = ?'),
@@ -114,7 +122,7 @@ const previewText = (mime, name, caption) => caption || (mime.startsWith('image/
 
 async function handleUpload(req, res, me, url) {
   const to = Number(url.searchParams.get('to'));
-  if (!q.userById.get(to) || to === me.id) return json(res, 400, { error: 'Неверный получатель' });
+  if (!q.userById.get(to)) return json(res, 400, { error: 'Неверный получатель' });
   const len = Number(req.headers['content-length'] || 0);
   if (!len) return json(res, 411, { error: 'Пустой файл' });
   if (len > MAX_FILE) return json(res, 413, { error: `Файл больше ${Math.round(MAX_FILE / 1048576)} МБ` });
@@ -137,9 +145,9 @@ async function handleUpload(req, res, me, url) {
   q.addFile.run(id, me.id, to, name, mime, bytes, w, h, created);
   const r = q.addFileMsg.run(me.id, to, caption, created, id);
   const msg = { id: Number(r.lastInsertRowid), from_id: me.id, to_id: to, text: caption, created_at: created, file: { id, name, mime, size: bytes, w, h } };
-  send(to, { type: 'msg', msg });
+  if (to !== me.id) send(to, { type: 'msg', msg });
   send(me.id, { type: 'msg', msg });
-  if (![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.username, body: previewText(mime, name, caption), from: me.id });
+  if (to !== me.id && ![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.username, body: previewText(mime, name, caption), from: me.id });
   json(res, 200, { ok: true, id: msg.id });
 }
 
@@ -267,6 +275,19 @@ async function api(req, res, url) {
     return json(res, 200, { ok: true });
   }
   if (!me) return json(res, 401, { error: 'auth' });
+  if (url.pathname === '/api/chats') {   // все чаты, включая «Избранное» (чат с самим собой)
+    return json(res, 200, q.allUsers.all().map((u) => {
+      const l = q.lastMsg.get(me.id, u.id);
+      return { id: u.id, username: u.username, last_seen: u.last_seen, self: u.id === me.id,
+        unread: u.id === me.id ? 0 : q.unreadCount.get(u.id, me.id).n,
+        last: l ? { id: l.id, from_id: l.from_id, text: l.text, created_at: l.created_at, file: l.fmime ? { mime: l.fmime, name: l.fname } : null } : null };
+    }));
+  }
+  if (url.pathname === '/api/read' && req.method === 'POST') {
+    const b = await readJson(req), peer = Number(b.with), upto = Number(b.upto);
+    if (q.userById.get(peer) && Number.isInteger(upto) && upto > 0) q.setRead.run(me.id, peer, upto);
+    return json(res, 200, { ok: true });
+  }
   if (url.pathname === '/api/upload' && req.method === 'POST') return await handleUpload(req, res, me, url);
   if (url.pathname.startsWith('/api/file/') && (req.method === 'GET' || req.method === 'HEAD')) return serveFile(req, res, me, url, url.pathname.slice(10));
   if (url.pathname === '/api/me') return json(res, 200, me);
@@ -328,15 +349,15 @@ wss.on('connection', (ws) => {
     }
     if (m.type !== 'msg') return;
     const to = Number(m.to), text = String(m.text || '').trim().slice(0, 4000);
-    if (!text || to === me.id || !q.userById.get(to)) return;
+    if (!text || !q.userById.get(to)) return;
     const created = Date.now();
     const r = q.addMsg.run(me.id, to, text, created);
     const msg = { id: Number(r.lastInsertRowid), from_id: me.id, to_id: to, text, created_at: created };
-    send(to, { type: 'msg', msg });
+    if (to !== me.id) send(to, { type: 'msg', msg });
     send(me.id, { type: 'msg', msg, cid: m.cid });
     // push, если получатель сейчас не смотрит в приложение (iOS требует показывать каждое push-уведомление)
     const watching = [...(online.get(to) || [])].some((w) => w.visible === true);
-    if (!watching) pushTo(to, { title: me.username, body: text.slice(0, 200), from: me.id });
+    if (to !== me.id && !watching) pushTo(to, { title: me.username, body: text.slice(0, 200), from: me.id });
   });
   ws.on('close', () => {
     online.get(me.id)?.delete(ws);
