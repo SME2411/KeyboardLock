@@ -517,6 +517,7 @@ async function openChat(c) {
   $('composer').hidden = bot; $('readonly').hidden = !bot; if (bot) $('emoji').hidden = true;
   ta.value = bot ? '' : (drafts[c.id] || ''); autosize();
   $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear(); lastRendered = 0;
+  msgEls.clear(); msgData.clear(); clearComposerMode();
   if (bot) {
     if (!localStorage.getItem('welcomeTime')) localStorage.setItem('welcomeTime', Date.now());
     const t0 = Number(localStorage.getItem('welcomeTime'));
@@ -541,6 +542,41 @@ function isBigEmoji(text) {
   const n = segmenter ? [...segmenter.segment(text.replace(/\s/g, ''))].length : [...text].length;
   return n >= 1 && n <= 3;
 }
+const msgEls = new Map(), msgData = new Map();   // id → элемент / данные сообщения
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '👎'];
+const replyName = (uid) => (uid === me.id ? 'Вы' : current?.name || 'Собеседник');
+const replyText = (r) => (r.deleted ? 'Сообщение удалено' : (r.file ? fileLabel(r.file.mime, r.file.name) + (r.text ? ' ' + r.text : '') : r.text));
+
+function quoteNode(m) {
+  const q = mk('div', 'quote'); const r = m.reply;
+  q.append(mk('b', '', r.deleted ? 'Ответ' : replyName(r.from_id)), mk('span', '', replyText(r)));
+  q.onclick = (e) => { e.stopPropagation(); scrollToMsg(r.id); };
+  return q;
+}
+function renderReacts(el, m) {
+  el.querySelector('.reacts')?.remove();
+  if (!m.reactions?.length) return;
+  const by = new Map();
+  for (const r of m.reactions) { const e = by.get(r.emoji) || { n: 0, mine: false }; e.n++; e.mine ||= r.user_id === me.id; by.set(r.emoji, e); }
+  const box = mk('div', 'reacts');
+  for (const [emoji, v] of by) {
+    const c = mk('button', 'chip' + (v.mine ? ' mine' : ''), emoji + (v.n > 1 ? ' ' + v.n : '')); c.type = 'button';
+    c.onclick = (e) => { e.stopPropagation(); toggleReaction(m, emoji); }; box.append(c);
+  }
+  el.append(box);
+}
+function fillMsg(el, m) {            // содержимое пузыря; вызывается и при правке/реакциях
+  el.textContent = '';
+  if (m.reply_to) el.append(quoteNode(m));
+  if (m.file) {
+    el.append(fileNode(m.file));
+    if (m.text) el.append(mk('div', 'cap', m.text));
+  } else el.append(mk('span', 'txt', m.text));
+  const d = new Date(m.created_at), t = document.createElement('time');
+  t.textContent = (m.edited_at ? 'изменено ' : '') + d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  if (m.from_id === me.id && current?.kind === 'user') t.append(' ', mk('span', 'tick', ''));
+  el.append(t); renderReacts(el, m); updateTicks();
+}
 function addMsg(m, animate = true) {
   if (seen.has(m.id)) return;
   seen.add(m.id); if (m.id > lastRendered) lastRendered = m.id;
@@ -548,18 +584,12 @@ function addMsg(m, animate = true) {
   if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; lastFrom = null; }
   const cont = lastFrom === m.from_id && m.created_at - lastTime < 2 * 60 * 1000;
   lastFrom = m.from_id; lastTime = m.created_at;
-  const el = document.createElement('div');
-  const media = !!m.file;
-  el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (media ? ' media' : (isBigEmoji(m.text) ? ' big' : ''));
-  if (media) {
-    el.append(fileNode(m.file));
-    if (m.text) { const c = document.createElement('div'); c.className = 'cap'; c.textContent = m.text; el.append(c); }
-  } else el.textContent = m.text;
-  const t = document.createElement('time'); t.textContent = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
-  el.dataset.mid = m.id;
-  if (m.from_id === me.id && current?.kind === 'user') { const k = mk('span', 'tick', ''); t.append(' ', k); }
-  el.append(t); box.append(el); updateTicks();
+  const el = document.createElement('div'); el.dataset.mid = m.id;
+  el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (m.file ? ' media' : (isBigEmoji(m.text) ? ' big' : ''));
+  msgEls.set(m.id, el); msgData.set(m.id, m);
+  fillMsg(el, m); box.append(el);
 }
+
 function updateTicks() {   // ✓ отправлено, ✓✓ прочитано собеседником
   if (current?.kind !== 'user') return;
   for (const k of document.querySelectorAll('.msg.me .tick')) {
@@ -568,6 +598,79 @@ function updateTicks() {   // ✓ отправлено, ✓✓ прочитан�
   }
 }
 const scrollDown = (smooth = true) => { const b = $('messages'); b.style.scrollBehavior = smooth ? 'smooth' : 'auto'; b.scrollTop = b.scrollHeight; };
+
+// ---------- действия с сообщениями: ответ, реакции, правка, удаление, меню ----------
+let replyTo = null, editing = null;
+function showBar(title, text) { $('rbTitle').textContent = title; $('rbText').textContent = text; $('replybar').hidden = false; }
+function clearComposerMode() { replyTo = null; editing = null; $('replybar').hidden = true; }
+function startReply(m) {
+  if (m.id <= 0 || current?.kind === 'bot') return;
+  editing = null; replyTo = m; showBar('Ответ: ' + replyName(m.from_id), replyText({ text: m.text, file: m.file })); ta.focus();
+}
+function startEdit(m) {
+  replyTo = null; editing = m; showBar('Изменение сообщения', m.text || '(без текста)'); ta.value = m.text || ''; autosize(); ta.focus();
+}
+$('rbClose').onclick = () => { if (editing) { ta.value = ''; autosize(); } clearComposerMode(); };
+const toggleReaction = (m, emoji) => {
+  const mine = (m.reactions || []).find((r) => r.user_id === me.id);
+  apiReq('POST', '/api/react', { id: m.id, emoji: mine?.emoji === emoji ? null : emoji }).catch((e) => toast(e.message));
+};
+function scrollToMsg(id) {
+  const el = msgEls.get(id); if (!el) { toast('Это сообщение выше в истории, прокрутите вверх'); return; }
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.remove('hl'); void el.offsetWidth; el.classList.add('hl');
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); } catch { const x = document.createElement('textarea'); x.value = t; document.body.append(x); x.select(); document.execCommand('copy'); x.remove(); }
+  toast('Скопировано', 1200);
+}
+function closeMenu() { $('menu').hidden = true; }
+function openMenu(m, x, y) {
+  const box = $('menuBox'); box.innerHTML = ''; box.style.left = box.style.top = '';
+  const mine = m.from_id === me.id, mkItem = (text, fn, cls) => { const b = mk('button', 'menu-item ' + (cls || ''), text); b.type = 'button'; b.onclick = () => { backLayer(); setTimeout(fn, 60); }; box.append(b); };
+  const rr = mk('div', 'menu-react'); const myR = (m.reactions || []).find((r) => r.user_id === me.id)?.emoji;
+  for (const e of REACTIONS) { const b = mk('button', myR === e ? 'on' : '', e); b.type = 'button'; b.onclick = () => { backLayer(); toggleReaction(m, e); }; rr.append(b); }
+  box.append(rr);
+  mkItem('Ответить', () => startReply(m));
+  if (m.text) mkItem('Копировать текст', () => copyText(m.text));
+  if (mine && m.text !== undefined) mkItem('Изменить', () => startEdit(m));
+  mkItem('Удалить у меня', () => apiReq('POST', '/api/delete', { id: m.id, all: false }).catch((e) => toast(e.message)), 'danger');
+  if (mine) mkItem('Удалить у обоих', () => { if (confirm('Удалить у обоих? Это нельзя отменить.')) apiReq('POST', '/api/delete', { id: m.id, all: true }).catch((e) => toast(e.message)); }, 'danger');
+  $('menu').hidden = false;
+  if (!narrow()) {   // на компьютере меню у курсора, на телефоне — снизу (стили)
+    const w = box.offsetWidth, h = box.offsetHeight;
+    box.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + 'px'; box.style.top = Math.max(8, Math.min(y, innerHeight - h - 8)) + 'px';
+  }
+  pushLayer('menu', closeMenu);
+}
+$('menuBg').onclick = () => backLayer();
+const msgOf = (t) => { const el = t.closest?.('.msg'); return el && el.dataset.mid > 0 && current?.kind !== 'bot' ? msgData.get(Number(el.dataset.mid)) : null; };
+
+const box0 = $('messages'); let press = null, lastTap = { id: 0, t: 0 };
+box0.addEventListener('contextmenu', (e) => { const m = msgOf(e.target); if (m && !e.target.closest('a')) { e.preventDefault(); openMenu(m, e.clientX, e.clientY); } });
+box0.addEventListener('touchstart', (e) => {
+  const m = msgOf(e.target); if (!m || e.touches.length !== 1) return;
+  const t = e.touches[0], el = e.target.closest('.msg');
+  press = { m, el, x: t.clientX, y: t.clientY, dx: 0, swiping: false, long: false };
+  press.timer = setTimeout(() => { if (press && !press.swiping) { press.long = true; navigator.vibrate?.(12); openMenu(m, press.x, press.y); } }, 450);
+}, { passive: true });
+box0.addEventListener('touchmove', (e) => {
+  if (!press) return; const t = e.touches[0], dx = t.clientX - press.x, dy = t.clientY - press.y;
+  if (!press.swiping && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { clearTimeout(press.timer); if (dx > 10 && Math.abs(dx) > Math.abs(dy) * 1.5) press.swiping = true; else { press = null; return; } }
+  if (press.swiping) { press.dx = dx; press.el.style.transform = `translateX(${Math.max(0, Math.min(dx * 0.6, 64))}px)`; }
+}, { passive: true });
+const endPress = () => {
+  if (!press) return; clearTimeout(press.timer);
+  if (press.swiping) { press.el.style.transform = ''; if (press.dx > 70) { navigator.vibrate?.(8); startReply(press.m); } }
+  press = null;
+};
+box0.addEventListener('touchend', endPress); box0.addEventListener('touchcancel', endPress);
+// двойной тап / двойной клик по сообщению — реакция ❤️
+box0.addEventListener('click', (e) => {
+  if (e.target.closest('.pic, .vid, audio, .doc, .chip, .quote, a')) return;
+  const el = e.target.closest('.msg'); const m = msgOf(e.target); if (!m || !el) return;
+  const now = Date.now();
+  if (lastTap.id === m.id && now - lastTap.t < 320) { lastTap = { id: 0, t: 0 }; toggleReaction(m, '❤️'); } else lastTap = { id: m.id, t: now };
+});
 
 // ---------- ввод ----------
 const ta = $('text');
@@ -589,11 +692,19 @@ ta.onkeydown = (e) => {
   const mobile = /Mobi|Android|iPhone/i.test(navigator.userAgent);
   if (e.key === 'Enter' && !e.shiftKey && !mobile && settings.enterSends) { e.preventDefault(); sendText(); }
 };
-function sendText() {
+async function sendText() {
   const text = ta.value.trim();
-  if (!text || !current || current.kind === 'bot' || ws?.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
-  ta.value = ''; delete drafts[current.id]; autosize();   // фокус не трогаем: клавиатура остаётся как была
+  if (!current || current.kind === 'bot') return;
+  if (editing) {                      // режим правки
+    if (!text && !editing.file) return;
+    const id = editing.id, same = text === (editing.text || '');
+    clearComposerMode(); ta.value = ''; autosize();
+    if (!same) apiReq('POST', '/api/edit', { id, text }).catch((e) => toast(e.message));
+    return;
+  }
+  if (!text || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: 'msg', to: current.id, text, ...(replyTo ? { reply: replyTo.id } : {}) }));
+  clearComposerMode(); ta.value = ''; delete drafts[current.id]; autosize();   // фокус не трогаем: клавиатура остаётся как была
 }
 
 // ---------- файлы ----------
@@ -672,7 +783,8 @@ async function uploadOne(file) {
   const ticker = setInterval(() => sendAction(kind), 1000); sendAction(kind);
   await new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/upload?to=${to}${w ? `&w=${w}&h=${h}` : ''}`);
+    const rep = replyTo ? replyTo.id : 0; if (rep) clearComposerMode();
+    xhr.open('POST', `/api/upload?to=${to}${w ? `&w=${w}&h=${h}` : ''}${rep ? `&reply=${rep}` : ''}`);
     xhr.setRequestHeader('Content-Type', mime); xhr.setRequestHeader('X-Filename', encodeURIComponent(name));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) { fill.style.width = (e.loaded / e.total * 100) + '%'; st.textContent = `${fmtSize(e.loaded)} из ${fmtSize(e.total)}`; } };
     xhr.onload = () => {
@@ -759,6 +871,22 @@ function connect() {
       if (d.left) { const u = chats.find((x) => x.id === d.left.id); if (u) u.last_seen = d.left.at; }
       if (d.online.some((id) => !chats.some((c) => c.id === id))) refreshChats();   // зарегистрировался новый участник
       else { renderChats(); updateStatus(); }
+    }
+    if (d.type === 'react') {
+      const m = msgData.get(d.id), el = msgEls.get(d.id);
+      if (m) { m.reactions = (m.reactions || []).filter((r) => r.user_id !== d.user_id); if (d.emoji) m.reactions.push({ user_id: d.user_id, emoji: d.emoji }); renderReacts(el, m); }
+    }
+    if (d.type === 'edit') {
+      const m = msgData.get(d.id);
+      if (m) { m.text = d.text; m.edited_at = d.edited_at; const el = msgEls.get(d.id); if (!m.file) el.classList.toggle('big', isBigEmoji(m.text)); fillMsg(el, m); }
+      for (const o of msgData.values()) if (o.reply?.id === d.id) { o.reply.text = d.text.slice(0, 120); fillMsg(msgEls.get(o.id), o); }
+      const c = chats.find((x) => x.last?.id === d.id); if (c) { c.last.text = d.text; renderChats(); }
+    }
+    if (d.type === 'del') {
+      const el = msgEls.get(d.id);
+      if (el) { el.classList.add('gone'); setTimeout(() => el.remove(), 220); msgEls.delete(d.id); msgData.delete(d.id); }
+      for (const o of msgData.values()) if (o.reply?.id === d.id) { o.reply = { id: d.id, deleted: true }; fillMsg(msgEls.get(o.id), o); }
+      loadChats();   // превью «последнего сообщения» в списке могло измениться
     }
     if (d.type === 'read') {   // собеседник прочитал наши сообщения
       const c = chats.find((x) => x.id === d.by); if (c) { c.peerRead = Math.max(c.peerRead || 0, d.upto); if (current?.id === c.id) updateTicks(); }

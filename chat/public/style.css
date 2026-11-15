@@ -215,3 +215,32 @@ label.fld textarea { resize: none; }
 
 #toast { position: fixed; left: 50%; bottom: calc(26px + env(safe-area-inset-bottom)); transform: translate(-50%, 12px); z-index: 40; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 14px; font-size: .92em; opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none; max-width: calc(100% - 32px); text-align: center; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ответы, реакции, меню сообщений */
+#messages { touch-action: pan-y; }
+.msg { transition: transform .18s; }
+.msg.gone { animation: gone .2s forwards; }
+@keyframes gone { to { opacity: 0; transform: scale(.92); } }
+.msg.hl { animation: hl 1.3s; }
+@keyframes hl { 0%, 55% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 1px 1.5px rgba(0,0,0,.12); } }
+@media (hover: none) { .msg { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; } }
+.quote { border-left: 3px solid color-mix(in srgb, currentColor 55%, transparent); padding: 3px 8px; margin: 0 0 5px; border-radius: 4px; background: color-mix(in srgb, currentColor 10%, transparent); font-size: .88em; cursor: pointer; }
+.quote b { display: block; font-weight: 600; } .quote span { display: block; opacity: .82; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.msg.media .quote { margin: 4px 4px 5px; }
+.reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; clear: both; }
+.chip { border: 1px solid color-mix(in srgb, currentColor 28%, transparent); background: color-mix(in srgb, currentColor 8%, transparent); border-radius: 12px; padding: 1px 8px; font-size: .85em; color: inherit; line-height: 1.5; }
+.chip.mine { background: color-mix(in srgb, currentColor 24%, transparent); border-color: currentColor; }
+.msg.media .reacts { padding: 0 6px 4px; }
+#replybar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 14px; background: var(--bg); box-shadow: 0 -1px 0 var(--line); position: relative; z-index: 2; }
+#replybar::before { content: ""; align-self: stretch; width: 3px; border-radius: 2px; background: var(--accent); margin-right: 2px; }
+.rb-body { flex: 1; min-width: 0; } .rb-body b { display: block; font-size: .85em; color: var(--accent); }
+.rb-body span { display: block; color: var(--muted); font-size: .9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#menu { position: fixed; inset: 0; z-index: 25; }
+#menuBg { position: absolute; inset: 0; background: rgba(0,0,0,.35); animation: fade .15s; }
+#menuBox { position: absolute; background: var(--bg); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 12px 40px rgba(0,0,0,.28); overflow: hidden; min-width: 240px; animation: pop .16s; }
+@media (max-width: 799px) { #menuBox { left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); } }
+.menu-react { display: flex; justify-content: space-around; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+.menu-react button { background: none; border: 0; font-size: 26px; padding: 4px 6px; border-radius: 12px; transition: transform .12s; }
+.menu-react button:hover { transform: scale(1.2); } .menu-react button.on { background: var(--them); }
+.menu-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 13px 18px; font-size: 1rem; }
+.menu-item:hover { background: var(--them); } .menu-item.danger { color: var(--danger); }
