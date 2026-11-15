@@ -35,12 +35,15 @@ db.exec(`
     p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL);
 `);
 
+try { db.exec('ALTER TABLE users ADD COLUMN last_seen INTEGER'); } catch { /* колонка уже есть */ }
+
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
   userById: db.prepare('SELECT id, username FROM users WHERE id = ?'),
   userCount: db.prepare('SELECT COUNT(*) AS n FROM users'),
   addUser: db.prepare('INSERT INTO users (username, salt, hash, created_at) VALUES (?, ?, ?, ?)'),
-  allUsers: db.prepare('SELECT id, username FROM users ORDER BY username'),
+  allUsers: db.prepare('SELECT id, username, last_seen FROM users ORDER BY username'),
+  touchSeen: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   addSession: db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)'),
   sessionUser: db.prepare('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
@@ -216,9 +219,10 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => { ws.user = me; wss.emit('connection', ws); });
 });
 
+const ACTIONS = new Set(['typing', 'voice', 'video', 'photo', 'file']);
 const send = (userId, obj) => online.get(userId)?.forEach((ws) => ws.readyState === 1 && ws.send(JSON.stringify(obj)));
 const presence = () => [...online.keys()];
-const broadcastPresence = () => { for (const id of online.keys()) send(id, { type: 'presence', online: presence() }); };
+const broadcastPresence = (extra = {}) => { for (const id of online.keys()) send(id, { type: 'presence', online: presence(), ...extra }); };
 
 wss.on('connection', (ws) => {
   const me = ws.user;
@@ -231,9 +235,9 @@ wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.type === 'vis') { ws.visible = m.visible === true; return; }
-    if (m.type === 'typing') {   // «печатает…» просто пересылаем собеседнику, в базу не пишем
+    if (m.type === 'act') {   // действие («печатает», «записывает голосовое»…): пересылаем собеседнику, в базу не пишем
       const t = Number(m.to);
-      if (t !== me.id && q.userById.get(t)) send(t, { type: 'typing', from: me.id });
+      if (ACTIONS.has(m.kind) && t !== me.id && q.userById.get(t)) send(t, { type: 'act', from: me.id, kind: m.kind });
       return;
     }
     if (m.type !== 'msg') return;
@@ -250,8 +254,12 @@ wss.on('connection', (ws) => {
   });
   ws.on('close', () => {
     online.get(me.id)?.delete(ws);
-    if (!online.get(me.id)?.size) online.delete(me.id);
-    broadcastPresence();
+    if (!online.get(me.id)?.size) {
+      online.delete(me.id);
+      const at = Date.now();
+      q.touchSeen.run(at, me.id);
+      broadcastPresence({ left: { id: me.id, at } });
+    } else broadcastPresence();
   });
 });
 
