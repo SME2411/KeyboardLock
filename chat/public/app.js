@@ -30,15 +30,74 @@ function applySettings() {
 function setSetting(k, v) { settings[k] = v; localStorage.setItem('duoverse.settings', JSON.stringify(settings)); applySettings(); }
 darkMq.addEventListener('change', applySettings);
 
+// ---------- кнопка «Назад»: каждое действие — отдельный шаг истории ----------
+// Слои (чат на телефоне, панели, панель эмодзи, просмотр фото) кладутся в историю браузера,
+// поэтому системная кнопка «Назад» / жест закрывает их по одному и не выходит из приложения.
+const layers = [];                // [{ name, close }]; верхний — последний
+let closingAll = false, exitTimer = null, historyReady = false, maxVV = 0;
+const vv = window.visualViewport;
+const pushLayer = (name, close) => { layers.push({ name, close }); history.pushState({ s: 'layer', d: layers.length }, ''); };
+const topLayer = () => layers[layers.length - 1]?.name;
+const hasLayer = (name) => layers.some((l) => l.name === name);
+const backLayer = () => { if (layers.length) history.back(); };           // закрыть верхний слой через историю
+function closeLayers(name) {                                                // закрыть слой name и всё, что над ним, одним переходом
+  const i = layers.findIndex((l) => l.name === name); if (i < 0) return;
+  closingAll = true; history.go(-(layers.length - i));
+}
+function toast(text, ms = 2200) {
+  const t = $('toast'); t.textContent = text; t.hidden = false; t.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(() => { t.classList.remove('show'); setTimeout(() => { t.hidden = true; }, 250); }, ms);
+}
+// клавиатура на телефоне открыта, если видимая область заметно ниже максимальной
+if (vv) { const upd = () => { maxVV = Math.max(maxVV, vv.height); }; vv.addEventListener('resize', upd); upd(); addEventListener('orientationchange', () => { maxVV = vv.height; }); }
+const keyboardOpen = () => !!vv && maxVV - vv.height > 120;
+// двойное «Назад» для выхода нужно только на телефонах/в установленном приложении; на iPhone выхода по «Назад» нет вообще
+const guardEnabled = () => !/iPhone|iPad|iPod/.test(navigator.userAgent) && (matchMedia('(display-mode: standalone)').matches || /Mobi|Android/i.test(navigator.userAgent));
+function initHistory() {
+  if (historyReady) return; historyReady = true;
+  const st = history.state;
+  if (typeof st?.d === 'number' && st.d > 0) { history.go(-st.d); return; }   // после перезагрузки внутри «слоёв» вернёмся к корню
+  if (guardEnabled()) {
+    if (st?.s === 'base') history.pushState({ s: 'root', d: 0 }, '');
+    else if (st?.s !== 'root') { history.replaceState({ s: 'base', d: -1 }, ''); history.pushState({ s: 'root', d: 0 }, ''); }
+  } else if (st?.s !== 'root') history.replaceState({ s: 'root', d: 0 }, '');
+}
+addEventListener('popstate', (e) => {
+  const st = e.state || {};
+  if (st.s === 'base') {            // дно истории: просим подтвердить выход
+    if (guardEnabled()) {
+      toast('Нажмите «Назад» ещё раз, чтобы выйти');
+      clearTimeout(exitTimer); exitTimer = setTimeout(() => history.pushState({ s: 'root', d: 0 }, ''), 2300);
+    }
+    return;
+  }
+  const target = typeof st.d === 'number' ? st.d : 0;
+  // с открытой клавиатурой первое «Назад» убирает клавиатуру, а не уходит из чата
+  if (layers.length > target && topLayer() === 'chat' && keyboardOpen() && document.activeElement === ta) {
+    ta.blur(); history.pushState({ s: 'layer', d: layers.length }, ''); return;
+  }
+  while (layers.length > target) layers.pop().close();
+  closingAll = false;
+});
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && layers.length && topLayer() !== 'chat') backLayer(); });
+
 // ---------- боковая панель (настройки, профиль) ----------
-function openSheet(title) {
+const sheetStack = [];   // перестройщики открытых окон: «Назад» из вложенного возвращает в предыдущее (настройки → устройства)
+function openSheet(title, rebuild, fromBack) {
+  if (fromBack !== true) {
+    sheetStack.push(rebuild);
+    pushLayer('sheet', () => {
+      sheetStack.pop(); const prev = sheetStack[sheetStack.length - 1];
+      if (prev && !closingAll) prev(true); else if (!prev) $('settings').hidden = true;
+    });
+  }
   const sh = $('sheet'); sh.innerHTML = '';
   const head = document.createElement('div'); head.className = 'sheet-head';
   const h = document.createElement('h2'); h.textContent = title;
   const x = document.createElement('button'); x.className = 'icon-btn'; x.textContent = '✕'; x.setAttribute('aria-label', 'Закрыть'); x.onclick = closeSettings;
   head.append(h, x); sh.append(head); $('settings').hidden = false; return sh;
 }
-const closeSettings = () => { $('settings').hidden = true; };
+const closeSettings = () => closeLayers('sheet');
 const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const section = (sh, text) => sh.append(mk('div', 'sec', text));
 function segRow(sh, k, label, opts, onChange) {
@@ -61,8 +120,8 @@ function switchRow(sh, k, label, hint, onChange) {
 const isDarkNow = () => document.documentElement.dataset.mode === 'dark';
 
 const WALLS = [['doodle', 'Узор'], ['dots', 'Точки'], ['grid', 'Сетка'], ['g1', 'Градиент 1'], ['g2', 'Градиент 2'], ['g3', 'Градиент 3'], ['none', 'Без фона'], ['custom', 'Своё фото']];
-function openSettings() {
-  const sh = openSheet('Настройки');
+function openSettings(fromBack) {
+  const sh = openSheet('Настройки', openSettings, fromBack === true);
   section(sh, 'Оформление');
   segRow(sh, 'mode', 'Режим', [['system', 'Как в телефоне'], ['light', 'Светлый'], ['dark', 'Тёмный']], () => { renderThemes(); });
   const trow = mk('div', 'row'); trow.append(mk('div', '', 'Тема')); sh.append(trow);
@@ -140,7 +199,6 @@ function openSettings() {
 }
 $('sheetBg').onclick = closeSettings;
 $('settingsBtn').onclick = openSettings;
-addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
 
 // уменьшает картинку и отдаёт data-URL (для фона) или Blob (для аватарки)
 async function resizeImage(file, max, quality, square) {
@@ -170,8 +228,8 @@ const ago = (ts) => {
   if (new Date(now - 864e5).toDateString() === d.toDateString()) return `вчера в ${t}`;
   return d.toLocaleDateString('ru', { day: 'numeric', month: 'long' });
 };
-async function openDevices() {
-  const sh = openSheet('Устройства');
+async function openDevices(fromBack) {
+  const sh = openSheet('Устройства', openDevices, fromBack === true);
   const list = await api('/api/sessions');
   sh.append(mk('div', 'prof-sub', 'Здесь все устройства, где выполнен вход в ваш аккаунт. Незнакомое можно завершить.'));
   const wrap = mk('div', 'devs'); sh.append(wrap);
@@ -180,12 +238,12 @@ async function openDevices() {
     const lab = mk('div', '', d.device + (d.current ? '  (это устройство)' : '')); lab.append(mk('small', '', 'активность: ' + ago(d.last_active)));
     row.append(lab);
     if (!d.current) {
-      const b = mk('button', 'btn danger', 'Завершить'); b.onclick = async () => { await apiReq('DELETE', '/api/sessions?id=' + d.id); openDevices(); }; row.append(b);
+      const b = mk('button', 'btn danger', 'Завершить'); b.onclick = async () => { await apiReq('DELETE', '/api/sessions?id=' + d.id); openDevices(true); }; row.append(b);
     }
     wrap.append(row);
   }
   if (list.length > 1) {
-    const rb = mk('div', 'rowbtn'); const all = mk('button', 'btn danger', 'Завершить все остальные'); all.onclick = async () => { if (confirm('Выйти со всех устройств, кроме этого?')) { await apiReq('DELETE', '/api/sessions?others=1'); openDevices(); } };
+    const rb = mk('div', 'rowbtn'); const all = mk('button', 'btn danger', 'Завершить все остальные'); all.onclick = async () => { if (confirm('Выйти со всех устройств, кроме этого?')) { await apiReq('DELETE', '/api/sessions?others=1'); openDevices(true); } };
     rb.append(all); sh.append(rb);
   }
   sh.append(mk('div', 'pad'));
@@ -199,8 +257,8 @@ function fillAvatar(el, u) {   // фото, если есть, иначе пер
   el.style.backgroundImage = ''; el.classList.remove('img'); el.textContent = dispName(u)[0].toUpperCase();
   if (u.avatar_v) { el.style.backgroundImage = `url(/api/avatar/${u.id}?v=${u.avatar_v})`; el.classList.add('img'); }
 }
-function openProfile() {
-  const sh = openSheet('Мой профиль');
+function openProfile(fromBack) {
+  const sh = openSheet('Мой профиль', openProfile, fromBack === true);
   const draft = { display_name: me.display_name || '', bio: me.bio || '', cover: me.cover || '' };
   const cover = mk('div', 'prof-cover'); cover.style.setProperty('--cover', coverCss(draft.cover) || ''); if (!draft.cover) cover.style.removeProperty('--cover');
   const av = mk('div', 'avatar prof-av'); fillAvatar(av, me);
@@ -246,8 +304,8 @@ function openProfile() {
   profileRefresh = () => { fillAvatar(av, me); av.append(cam); };
 }
 let profileRefresh = null;
-function openUserCard(c) {   // профиль собеседника, только просмотр
-  const sh = openSheet('Профиль');
+function openUserCard(c, fromBack) {   // профиль собеседника, только просмотр
+  const sh = openSheet('Профиль', (fb) => openUserCard(c, fb), fromBack === true);
   const cover = mk('div', 'prof-cover'); if (c.cover && coverCss(c.cover)) cover.style.setProperty('--cover', coverCss(c.cover));
   const av = mk('div', 'avatar prof-av'); fillAvatar(av, c);
   sh.append(cover, av, mk('div', 'prof-name', dispName(c)), mk('div', 'prof-sub', '@' + c.username), mk('div', 'prof-sub', seenText(c)));
@@ -302,6 +360,7 @@ async function start() {
   try { me = await api('/api/me'); } catch { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth').hidden = true; $('app').hidden = false;
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+  initHistory();
   paintMe();
   await loadChats();
   connect();
@@ -439,16 +498,19 @@ function renderChats() {
     h.textContent = 'Второй участник ещё не зарегистрировался. Как только он войдёт по коду приглашения, чат появится здесь.'; box.append(h);
   }
 }
-$('back').onclick = () => {
+const narrow = () => matchMedia('(max-width: 799px)').matches;
+function leaveChatView() {
   current = null; $('app').dataset.view = 'list'; $('chat').hidden = true; $('empty').hidden = false;
-  $('emoji').hidden = true; $('emojiBtn').textContent = '😊'; renderChats();
-};
+  closeEmojiUI(); renderChats();
+}
+$('back').onclick = () => (hasLayer('chat') ? closeLayers('chat') : leaveChatView());
 
 // ---------- чат ----------
 let lastDay = '', lastFrom = null, lastTime = 0, openSeq = 0, lastRendered = 0;
 const seen = new Set();   // id уже показанных сообщений: защита от дублей
 async function openChat(c) {
   const my = ++openSeq;
+  if (narrow() && !hasLayer('chat')) pushLayer('chat', leaveChatView);   // на телефоне чат — отдельный шаг «Назад»
   current = c; $('app').dataset.view = 'chat'; $('empty').hidden = true; $('chat').hidden = false;
   setAvatar($('avatar'), c); $('title').textContent = c.name; updateStatus();
   const bot = c.kind === 'bot';
@@ -510,7 +572,12 @@ const scrollDown = (smooth = true) => { const b = $('messages'); b.style.scrollB
 // ---------- ввод ----------
 const ta = $('text');
 function syncSend() { $('sendBtn').classList.toggle('idle', !ta.value.trim()); }
-function autosize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; syncSend(); saveDraft(); }
+function autosize() {   // высота = содержимое + рамка (иначе внутри остаётся лишние 2px и появляется полоса прокрутки)
+  ta.style.height = 'auto';
+  const need = ta.scrollHeight + (ta.offsetHeight - ta.clientHeight);
+  ta.style.height = Math.min(need, 130) + 'px'; ta.style.overflowY = need > 130 ? 'auto' : 'hidden';
+  syncSend(); saveDraft();
+}
 function saveDraft() {   // черновик у каждого чата свой, переживает перезагрузку
   if (!current || current.kind === 'bot') return;
   const t = ta.value; if (t.trim()) drafts[current.id] = t; else delete drafts[current.id];
@@ -526,7 +593,7 @@ function sendText() {
   const text = ta.value.trim();
   if (!text || !current || current.kind === 'bot' || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
-  ta.value = ''; delete drafts[current.id]; autosize(); ta.focus();
+  ta.value = ''; delete drafts[current.id]; autosize();   // фокус не трогаем: клавиатура остаётся как была
 }
 
 // ---------- файлы ----------
@@ -562,9 +629,9 @@ function fileNode(f) {
 }
 function openLightbox(f) {
   const lb = $('lightbox'); lb.querySelector('img').src = fileUrl(f); $('lbDl').href = fileUrl(f, true); $('lbDl').download = f.name; lb.hidden = false;
+  pushLayer('lightbox', () => { lb.hidden = true; });
 }
-$('lightbox').onclick = (e) => { if (e.target.id !== 'lbDl') $('lightbox').hidden = true; };
-addEventListener('keydown', (e) => { if (e.key === 'Escape') $('lightbox').hidden = true; });
+$('lightbox').onclick = (e) => { if (e.target.id !== 'lbDl' && topLayer() === 'lightbox') backLayer(); };
 
 // сжатие JPEG: уменьшаем до 2560 px и перекодируем (заодно пропадает EXIF с геопозицией)
 async function prepareImage(file) {
@@ -663,12 +730,18 @@ function buildEmoji() {
     const b = document.createElement('button'); b.type = 'button'; b.textContent = k; b.dataset.k = k; b.onclick = () => show(k); tabs.append(b);
   }
   $('emojiBtn').onclick = () => {
-    const open = $('emoji').hidden; $('emoji').hidden = !open;
-    $('emojiBtn').textContent = open ? '⌨️' : '😊';
-    if (open) show(recent().length ? '🕘' : '😊'); else ta.focus();
-    setTimeout(() => scrollDown(false), 30);
+    if ($('emoji').hidden) {            // открыть панель: клавиатуру убираем, чтобы они не лежали друг на друге
+      ta.blur(); $('emoji').hidden = false; $('emojiBtn').textContent = '⌨️';
+      show(recent().length ? '🕘' : '😊'); pushLayer('emoji', closeEmojiUI);
+    } else { if (topLayer() === 'emoji') backLayer(); ta.focus(); }    // обратно к клавиатуре
+    setTimeout(() => scrollDown(false), 60);
   };
 }
+function closeEmojiUI() { $('emoji').hidden = true; $('emojiBtn').textContent = '😊'; }
+// когда пользователь нажал на поле ввода и открылась клавиатура, панель эмодзи убираем
+$('text').addEventListener('focus', () => { if (!$('emoji').hidden && topLayer() === 'emoji') backLayer(); });
+// кнопка «Отправить» не отнимает фокус у поля: клавиатура не прыгает ни туда, ни обратно
+$('sendBtn').addEventListener('pointerdown', (e) => e.preventDefault());
 
 // ---------- websocket с автопереподключением ----------
 const isVisible = () => !document.hidden && document.hasFocus();
