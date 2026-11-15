@@ -50,10 +50,8 @@ systemctl daemon-reload
 systemctl enable --now duoverse
 systemctl restart caddy
 
-# ежедневный бэкап в 04:00
-cat > /etc/cron.d/duoverse-backup <<EOT
-0 4 * * * duoverse DB_PATH=/var/lib/duoverse/chat.db BACKUP_DIR=/var/backups/duoverse /usr/bin/node --disable-warning=ExperimentalWarning /opt/duoverse/chat/deploy/backup.mjs >> /var/log/duoverse-backup.log 2>&1
-EOT
+# ежедневный бэкап в 04:00 (cron + первая копия)
+bash /opt/duoverse/chat/deploy/install-backup.sh
 
 # файрвол: только SSH, HTTP, HTTPS
 ufw allow OpenSSH && ufw allow 80/tcp && ufw allow 443/tcp
