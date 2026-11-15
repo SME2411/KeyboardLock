@@ -11,7 +11,7 @@ const api = async (path, body) => {
 };
 
 // ---------- настройки (хранятся на устройстве) ----------
-const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true };
+const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true, compress: true };
 let settings = { ...DEFAULTS };
 try { settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('duoverse.settings') || '{}') }; } catch {}
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
@@ -37,6 +37,7 @@ const SCHEMA = [
   { sec: 'Чат' },
   { k: 'enterSends', t: 'sw', label: 'Enter отправляет', hint: 'На компьютере; Shift+Enter — новая строка' },
   { k: 'showTyping', t: 'sw', label: 'Показывать, что я печатаю', hint: 'Если выключить, собеседник не увидит «печатает…»' },
+  { k: 'compress', t: 'sw', label: 'Сжимать фото при отправке', hint: 'Меньше трафика, и пропадают метаданные (в т.ч. место съёмки)' },
 ];
 function openSettings() {
   const sh = $('sheet'); sh.innerHTML = '';
@@ -246,8 +247,12 @@ function addMsg(m, animate = true) {
   const cont = lastFrom === m.from_id && m.created_at - lastTime < 2 * 60 * 1000;
   lastFrom = m.from_id; lastTime = m.created_at;
   const el = document.createElement('div');
-  el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (isBigEmoji(m.text) ? ' big' : '');
-  el.textContent = m.text;
+  const media = !!m.file;
+  el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (media ? ' media' : (isBigEmoji(m.text) ? ' big' : ''));
+  if (media) {
+    el.append(fileNode(m.file));
+    if (m.text) { const c = document.createElement('div'); c.className = 'cap'; c.textContent = m.text; el.append(c); }
+  } else el.textContent = m.text;
   const t = document.createElement('time'); t.textContent = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   el.append(t); box.append(el);
 }
@@ -269,6 +274,109 @@ function sendText() {
   ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
   ta.value = ''; autosize(); ta.focus();
 }
+
+// ---------- файлы ----------
+const MAX_MB = 100;
+const fileUrl = (f, dl) => `/api/file/${f.id}${dl ? '?dl=1' : ''}`;
+const fmtSize = (n) => n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(0) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ';
+function fit(f, maxW = 320, maxH = 380) {
+  if (!f.w || !f.h) return null;
+  const k = Math.min(maxW / f.w, maxH / f.h, 1); return { w: Math.round(f.w * k), h: Math.round(f.h * k) };
+}
+function docNode(f) {
+  const a = document.createElement('a'); a.className = 'doc'; a.href = fileUrl(f, true); a.download = f.name;
+  const ic = document.createElement('div'); ic.className = 'ic'; ic.textContent = (f.name.includes('.') ? f.name.split('.').pop() : 'FILE').slice(0, 4).toUpperCase();
+  const tx = document.createElement('div'); const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = f.name;
+  const sm = document.createElement('small'); sm.textContent = fmtSize(f.size); tx.append(nm, sm); a.append(ic, tx); return a;
+}
+function fileNode(f) {
+  const size = fit(f), setSize = (el) => { if (size) { el.style.width = size.w + 'px'; el.style.height = size.h + 'px'; } };
+  if (/^image\/(jpeg|png|gif|webp|avif|heic|heif)$/.test(f.mime)) {
+    const img = document.createElement('img'); img.className = 'pic'; img.loading = 'lazy'; img.alt = f.name; img.src = fileUrl(f); setSize(img);
+    img.onclick = () => openLightbox(f);
+    img.onerror = () => img.replaceWith(docNode(f));   // формат не поддерживается браузером: покажем как файл
+    return img;
+  }
+  if (/^video\/(mp4|quicktime|webm|x-m4v)$/.test(f.mime)) {
+    const v = document.createElement('video'); v.className = 'vid'; v.controls = true; v.playsInline = true; v.preload = 'metadata'; v.src = fileUrl(f) + (f.id ? '#t=0.001' : ''); setSize(v);
+    v.onerror = () => v.replaceWith(docNode(f)); return v;
+  }
+  if (/^audio\//.test(f.mime) && /^audio\/(mpeg|mp4|x-m4a|aac|webm|ogg|wav|x-wav)$/.test(f.mime)) {
+    const au = document.createElement('audio'); au.className = 'audio'; au.controls = true; au.preload = 'metadata'; au.src = fileUrl(f); return au;
+  }
+  return docNode(f);
+}
+function openLightbox(f) {
+  const lb = $('lightbox'); lb.querySelector('img').src = fileUrl(f); $('lbDl').href = fileUrl(f, true); $('lbDl').download = f.name; lb.hidden = false;
+}
+$('lightbox').onclick = (e) => { if (e.target.id !== 'lbDl') $('lightbox').hidden = true; };
+addEventListener('keydown', (e) => { if (e.key === 'Escape') $('lightbox').hidden = true; });
+
+// сжатие JPEG: уменьшаем до 2560 px и перекодируем (заодно пропадает EXIF с геопозицией)
+async function prepareImage(file) {
+  const bmp = await createImageBitmap(file);
+  let { width: w, height: h } = bmp, blob = file;
+  if (settings.compress && file.type === 'image/jpeg') {
+    const k = Math.min(1, 2560 / Math.max(w, h)); const cw = Math.round(w * k), ch = Math.round(h * k);
+    const c = document.createElement('canvas'); c.width = cw; c.height = ch; c.getContext('2d').drawImage(bmp, 0, 0, cw, ch);
+    const out = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.86));
+    if (out) { blob = out; w = cw; h = ch; }
+  }
+  bmp.close?.(); return { blob, w, h };
+}
+const videoDims = (file) => new Promise((res, rej) => {
+  const v = document.createElement('video'), u = URL.createObjectURL(file); v.preload = 'metadata';
+  v.onloadedmetadata = () => { res({ w: v.videoWidth, h: v.videoHeight }); URL.revokeObjectURL(u); };
+  v.onerror = () => { rej(); URL.revokeObjectURL(u); }; v.src = u;
+});
+
+async function uploadOne(file) {
+  const to = current.id, box = $('messages');
+  const ph = document.createElement('div'); ph.className = 'msg me upl' + (box.lastElementChild ? '' : '');
+  const label = document.createElement('div'); label.textContent = file.name || 'файл';
+  const bar = document.createElement('div'); bar.className = 'bar'; const fill = document.createElement('i'); bar.append(fill);
+  const st = document.createElement('small'); st.textContent = 'Подготовка…'; ph.append(label, bar, st); box.append(ph); scrollDown();
+  const fail = (msg) => { st.textContent = msg; bar.remove(); setTimeout(() => ph.remove(), 6000); };
+  if (file.size > MAX_MB * 1048576) return fail(`Файл больше ${MAX_MB} МБ`);
+
+  let blob = file, name = file.name || 'file', mime = file.type || 'application/octet-stream', w, h;
+  try {
+    if (/^image\/(jpeg|png|webp|avif|heic|heif)$/.test(mime)) {
+      const r = await prepareImage(file); blob = r.blob; w = r.w; h = r.h;
+      if (blob !== file) name = name.replace(/\.[^.]+$/, '') + '.jpg';
+    } else if (mime.startsWith('video/')) ({ w, h } = await videoDims(file));
+  } catch { /* размеры необязательны: отправим как есть */ }
+
+  const kind = mime.startsWith('image/') ? 'photo' : 'file';
+  const ticker = setInterval(() => sendAction(kind), 1000); sendAction(kind);
+  await new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/upload?to=${to}${w ? `&w=${w}&h=${h}` : ''}`);
+    xhr.setRequestHeader('Content-Type', mime); xhr.setRequestHeader('X-Filename', encodeURIComponent(name));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) { fill.style.width = (e.loaded / e.total * 100) + '%'; st.textContent = `${fmtSize(e.loaded)} из ${fmtSize(e.total)}`; } };
+    xhr.onload = () => {
+      if (xhr.status === 200) ph.remove();
+      else { let m = 'Не удалось отправить'; try { m = JSON.parse(xhr.responseText).error || m; } catch {} fail(m); }
+      resolve();
+    };
+    xhr.onerror = () => { fail('Нет связи. Файл не отправлен'); resolve(); };
+    xhr.send(blob);
+  });
+  clearInterval(ticker);
+}
+let uploading = Promise.resolve();
+function sendFiles(files) {
+  if (!current) return;
+  for (const f of files) uploading = uploading.then(() => uploadOne(f)).catch(console.error);   // по очереди
+}
+$('attachBtn').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => { sendFiles([...e.target.files]); e.target.value = ''; };
+ta.addEventListener('paste', (e) => { const fs = e.clipboardData?.files; if (fs?.length) { e.preventDefault(); sendFiles([...fs]); } });
+const chatEl = $('chat'); let dragDepth = 0;
+chatEl.addEventListener('dragenter', (e) => { if (e.dataTransfer?.types.includes('Files')) { dragDepth++; chatEl.classList.add('drag'); } });
+chatEl.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; chatEl.classList.remove('drag'); } });
+chatEl.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
+chatEl.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; chatEl.classList.remove('drag'); if (e.dataTransfer?.files.length) sendFiles([...e.dataTransfer.files]); });
 
 // ---------- эмодзи ----------
 const EMOJI = {

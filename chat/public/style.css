@@ -136,3 +136,25 @@ header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; padd
 .btn { border: 1px solid var(--line); background: var(--them); border-radius: 10px; padding: 8px 14px; }
 .btn.danger { color: var(--danger); }
 .pad { height: 24px; }
+
+/* ---------- файлы ---------- */
+.msg.media { padding: 3px; overflow: hidden; }
+.msg.media .cap { padding: 6px 9px 2px; white-space: pre-wrap; }
+.msg.media time { padding: 0 8px 3px; }
+.msg.media.me { background: var(--me); } .msg:not(.me).media { background: var(--them); }
+.pic, .vid { display: block; max-width: min(100%, 320px); max-height: 380px; width: auto; height: auto; border-radius: 13px; background: var(--line); cursor: zoom-in; object-fit: cover; }
+.vid { cursor: default; max-width: min(100%, 320px); }
+.msg.media .ph { position: relative; }
+.audio { width: min(260px, 100%); display: block; margin: 3px; }
+.doc { display: flex; align-items: center; gap: 10px; padding: 6px 8px; text-decoration: none; color: inherit; min-width: 190px; }
+.doc .ic { flex: none; width: 40px; height: 40px; border-radius: 10px; background: color-mix(in srgb, currentColor 14%, transparent); display: grid; place-items: center; font-size: .72em; font-weight: 700; letter-spacing: .02em; }
+.doc .nm { display: block; font-weight: 600; overflow-wrap: anywhere; line-height: 1.2; }
+.doc small { opacity: .65; }
+.msg.upl { opacity: .85; min-width: 200px; }
+.msg.upl .bar { height: 4px; border-radius: 2px; background: color-mix(in srgb, currentColor 22%, transparent); margin: 6px 0 4px; overflow: hidden; }
+.msg.upl .bar i { display: block; height: 100%; width: 0; background: currentColor; transition: width .15s; }
+#chat.drag::after { content: "Отпустите, чтобы отправить"; position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 85%, transparent); border: 2px dashed var(--accent); border-radius: 16px; font-weight: 600; z-index: 5; }
+#chat { position: relative; }
+#lightbox { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.92); display: grid; place-items: center; cursor: zoom-out; }
+#lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+#lightbox a { position: absolute; top: max(14px, env(safe-area-inset-top)); right: 16px; color: #fff; background: rgba(255,255,255,.14); border-radius: 10px; padding: 8px 14px; text-decoration: none; font-size: .9em; }

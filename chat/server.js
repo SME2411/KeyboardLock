@@ -4,6 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { WebSocketServer } from 'ws';
 import * as webpush from 'web-push';
 
@@ -15,8 +17,12 @@ const INVITE = process.env.INVITE_CODE || '';           // без кода ре�
 const SECURE = process.env.COOKIE_SECURE === '1';       // включить за HTTPS
 const MAX_USERS = Number(process.env.MAX_USERS || 5);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'chat.db');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(path.dirname(DB_PATH), 'uploads');
+const MAX_FILE = Number(process.env.MAX_FILE_MB || 100) * 1024 * 1024;        // максимум на один файл
+const MAX_STORAGE = Number(process.env.MAX_STORAGE_GB || 15) * 1024 ** 3;       // максимум на все файлы вместе
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
@@ -30,12 +36,16 @@ db.exec(`
     text TEXT NOT NULL, created_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_id, to_id, id);
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, to_id INTEGER NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
+    size INTEGER NOT NULL, w INTEGER, h INTEGER, created_at INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS push_subs (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, endpoint TEXT UNIQUE NOT NULL,
     p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL);
 `);
 
 try { db.exec('ALTER TABLE users ADD COLUMN last_seen INTEGER'); } catch { /* колонка уже есть */ }
+try { db.exec('ALTER TABLE messages ADD COLUMN file_id TEXT'); } catch { /* колонка уже есть */ }
 
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
@@ -54,9 +64,15 @@ const q = {
     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`),
   subsOf: db.prepare('SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?'),
   delSub: db.prepare('DELETE FROM push_subs WHERE endpoint = ?'),
-  history: db.prepare(`SELECT id, from_id, to_id, text, created_at FROM messages
-    WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND (?3 = 0 OR id < ?3)
-    ORDER BY id DESC LIMIT 50`),
+  history: db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.created_at,
+      f.id AS fid, f.name AS fname, f.mime AS fmime, f.size AS fsize, f.w AS fw, f.h AS fh
+    FROM messages m LEFT JOIN files f ON f.id = m.file_id
+    WHERE ((m.from_id = ?1 AND m.to_id = ?2) OR (m.from_id = ?2 AND m.to_id = ?1)) AND (?3 = 0 OR m.id < ?3)
+    ORDER BY m.id DESC LIMIT 50`),
+  addFile: db.prepare('INSERT INTO files (id, owner_id, to_id, name, mime, size, w, h, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  addFileMsg: db.prepare('INSERT INTO messages (from_id, to_id, text, created_at, file_id) VALUES (?, ?, ?, ?, ?)'),
+  fileById: db.prepare('SELECT * FROM files WHERE id = ?'),
+  usage: db.prepare('SELECT COALESCE(SUM(size), 0) AS n FROM files'),
 };
 
 // ---------- web push ----------
@@ -82,6 +98,74 @@ async function pushTo(userId, payload) {
       else console.error('push error', e.statusCode || e.message);
     }
   }
+}
+
+
+// ---------- файлы ----------
+const INLINE_MIME = /^(image\/(jpeg|png|gif|webp|avif|heic|heif)|video\/(mp4|quicktime|webm|x-m4v)|audio\/(mpeg|mp4|x-m4a|aac|webm|ogg|wav|x-wav))$/;
+const rowToMsg = (r) => ({
+  id: r.id, from_id: r.from_id, to_id: r.to_id, text: r.text, created_at: r.created_at,
+  ...(r.fid ? { file: { id: r.fid, name: r.fname, mime: r.fmime, size: r.fsize, w: r.fw, h: r.fh } } : {}),
+});
+const cleanName = (n) => String(n || 'file').replace(/[\x00-\x1f\x7f\\/:*?"<>|]/g, '_').replace(/^\.+/, '').trim().slice(0, 150) || 'file';
+const cleanMime = (m) => (/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(String(m || '').split(';')[0].trim()) ? String(m).split(';')[0].trim().toLowerCase() : 'application/octet-stream');
+const dim = (v) => { const n = Math.round(Number(v)); return n > 0 && n <= 20000 ? n : null; };
+const previewText = (mime, name, caption) => caption || (mime.startsWith('image/') ? '📷 Фото' : mime.startsWith('video/') ? '🎬 Видео' : mime.startsWith('audio/') ? '🎵 Аудио' : '📎 ' + name);
+
+async function handleUpload(req, res, me, url) {
+  const to = Number(url.searchParams.get('to'));
+  if (!q.userById.get(to) || to === me.id) return json(res, 400, { error: 'Неверный получатель' });
+  const len = Number(req.headers['content-length'] || 0);
+  if (!len) return json(res, 411, { error: 'Пустой файл' });
+  if (len > MAX_FILE) return json(res, 413, { error: `Файл больше ${Math.round(MAX_FILE / 1048576)} МБ` });
+  if (q.usage.get().n + len > MAX_STORAGE) return json(res, 507, { error: 'На сервере закончилось место для файлов' });
+
+  const name = cleanName(decodeURIComponent(String(req.headers['x-filename'] || 'file')));
+  const mime = cleanMime(req.headers['content-type']);
+  const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 1000);
+  const id = crypto.randomBytes(16).toString('hex');
+  const tmp = path.join(UPLOAD_DIR, id + '.part'), final = path.join(UPLOAD_DIR, id);
+
+  let bytes = 0;
+  const limiter = new Transform({ transform(chunk, _e, cb) { bytes += chunk.length; cb(bytes > MAX_FILE ? new Error('too big') : null, chunk); } });
+  try { await pipeline(req, limiter, fs.createWriteStream(tmp)); }
+  catch { fs.rmSync(tmp, { force: true }); if (!res.writableEnded && !res.destroyed) json(res, 413, { error: 'Загрузка прервана' }); return; }
+  if (bytes === 0) { fs.rmSync(tmp, { force: true }); return json(res, 400, { error: 'Пустой файл' }); }
+  fs.renameSync(tmp, final);
+
+  const created = Date.now(), w = dim(url.searchParams.get('w')), h = dim(url.searchParams.get('h'));
+  q.addFile.run(id, me.id, to, name, mime, bytes, w, h, created);
+  const r = q.addFileMsg.run(me.id, to, caption, created, id);
+  const msg = { id: Number(r.lastInsertRowid), from_id: me.id, to_id: to, text: caption, created_at: created, file: { id, name, mime, size: bytes, w, h } };
+  send(to, { type: 'msg', msg });
+  send(me.id, { type: 'msg', msg });
+  if (![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.username, body: previewText(mime, name, caption), from: me.id });
+  json(res, 200, { ok: true, id: msg.id });
+}
+
+function serveFile(req, res, me, url, id) {
+  const f = /^[a-f0-9]{32}$/.test(id) ? q.fileById.get(id) : undefined;
+  if (!f || (f.owner_id !== me.id && f.to_id !== me.id)) { res.writeHead(404); return res.end('Not found'); }
+  const file = path.join(UPLOAD_DIR, f.id);
+  if (!fs.existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
+  const inline = INLINE_MIME.test(f.mime) && url.searchParams.get('dl') !== '1';
+  const headers = {
+    'Content-Type': inline ? f.mime : 'application/octet-stream',
+    'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(f.name)}`,
+    'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'",
+    'Cache-Control': 'private, max-age=31536000, immutable', 'Accept-Ranges': 'bytes',   // Range нужен для видео на iPhone
+  };
+  let start = 0, end = f.size - 1, code = 200;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (m && (m[1] || m[2])) {
+    if (m[1]) { start = Number(m[1]); if (m[2]) end = Math.min(Number(m[2]), end); } else { start = Math.max(0, f.size - Number(m[2])); }
+    if (start > end || start >= f.size) { res.writeHead(416, { 'Content-Range': `bytes */${f.size}` }); return res.end(); }
+    code = 206; headers['Content-Range'] = `bytes ${start}-${end}/${f.size}`;
+  }
+  headers['Content-Length'] = end - start + 1;
+  res.writeHead(code, headers);
+  if (req.method === 'HEAD') return res.end();
+  fs.createReadStream(file, { start, end }).on('error', () => res.destroy()).pipe(res);
 }
 
 // ---------- auth ----------
@@ -183,12 +267,14 @@ async function api(req, res, url) {
     return json(res, 200, { ok: true });
   }
   if (!me) return json(res, 401, { error: 'auth' });
+  if (url.pathname === '/api/upload' && req.method === 'POST') return await handleUpload(req, res, me, url);
+  if (url.pathname.startsWith('/api/file/') && (req.method === 'GET' || req.method === 'HEAD')) return serveFile(req, res, me, url, url.pathname.slice(10));
   if (url.pathname === '/api/me') return json(res, 200, me);
   if (url.pathname === '/api/users') return json(res, 200, q.allUsers.all().filter((u) => u.id !== me.id));
   if (url.pathname === '/api/messages') {
     const other = Number(url.searchParams.get('with')), before = Number(url.searchParams.get('before') || 0);
     if (!q.userById.get(other)) return json(res, 404, { error: 'no user' });
-    return json(res, 200, q.history.all(me.id, other, before).reverse());
+    return json(res, 200, q.history.all(me.id, other, before).reverse().map(rowToMsg));
   }
   if (url.pathname === '/api/push/key') return json(res, 200, { key: vapidPublic });
   if (url.pathname === '/api/push/subscribe' && req.method === 'POST') {
@@ -271,4 +357,5 @@ setInterval(() => {
   }
 }, 25_000);
 
+server.requestTimeout = 30 * 60 * 1000;   // большие файлы по мобильной сети могут грузиться долго
 server.listen(PORT, HOST, () => console.log(`Chat on http://${HOST}:${PORT} (регистрация ${INVITE ? 'по коду' : 'ЗАКРЫТА — задай INVITE_CODE'})`));
