@@ -23,6 +23,7 @@ const MAX_STORAGE = Number(process.env.MAX_STORAGE_GB || 15) * 1024 ** 3;       
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const AVATAR_DIR = path.join(UPLOAD_DIR, 'avatars'); fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
@@ -47,16 +48,22 @@ db.exec(`
 
 try { db.exec('ALTER TABLE users ADD COLUMN last_seen INTEGER'); } catch { /* колонка уже есть */ }
 try { db.exec('ALTER TABLE messages ADD COLUMN file_id TEXT'); } catch { /* колонка уже есть */ }
+for (const col of ['display_name TEXT', 'bio TEXT', 'avatar_v INTEGER', 'cover TEXT']) {
+  try { db.exec('ALTER TABLE users ADD COLUMN ' + col); } catch { /* колонка уже есть */ }
+}
 
 const q = {
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
   userById: db.prepare('SELECT id, username FROM users WHERE id = ?'),
   userCount: db.prepare('SELECT COUNT(*) AS n FROM users'),
   addUser: db.prepare('INSERT INTO users (username, salt, hash, created_at) VALUES (?, ?, ?, ?)'),
-  allUsers: db.prepare('SELECT id, username, last_seen FROM users ORDER BY username'),
+  allUsers: db.prepare('SELECT id, username, last_seen, display_name, bio, avatar_v, cover FROM users ORDER BY username'),
+  userFull: db.prepare('SELECT id, username, display_name, bio, avatar_v, cover FROM users WHERE id = ?'),
+  setProfile: db.prepare('UPDATE users SET display_name = ?, bio = ?, cover = ? WHERE id = ?'),
+  setAvatarV: db.prepare('UPDATE users SET avatar_v = ? WHERE id = ?'),
   touchSeen: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   addSession: db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)'),
-  sessionUser: db.prepare('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
+  sessionUser: db.prepare('SELECT u.id, u.username, u.display_name, u.bio, u.avatar_v, u.cover FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
   addMsg: db.prepare('INSERT INTO messages (from_id, to_id, text, created_at) VALUES (?, ?, ?, ?)'),
   getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
@@ -147,7 +154,7 @@ async function handleUpload(req, res, me, url) {
   const msg = { id: Number(r.lastInsertRowid), from_id: me.id, to_id: to, text: caption, created_at: created, file: { id, name, mime, size: bytes, w, h } };
   if (to !== me.id) send(to, { type: 'msg', msg });
   send(me.id, { type: 'msg', msg });
-  if (to !== me.id && ![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.username, body: previewText(mime, name, caption), from: me.id });
+  if (to !== me.id && ![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.display_name || me.username, body: previewText(mime, name, caption), from: me.id });
   json(res, 200, { ok: true, id: msg.id });
 }
 
@@ -174,6 +181,27 @@ function serveFile(req, res, me, url, id) {
   res.writeHead(code, headers);
   if (req.method === 'HEAD') return res.end();
   fs.createReadStream(file, { start, end }).on('error', () => res.destroy()).pipe(res);
+}
+
+
+// ---------- профиль и аватарки ----------
+const COVER_RE = /^c[1-9]$/;
+function sniffImage(buf) {
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 8 && buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG') return 'image/png';
+  if (buf.length > 12 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+const cleanText = (v, max) => String(v ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim().slice(0, max);
+const publicProfile = (id) => q.userFull.get(id);
+const broadcastAll = (obj) => { for (const id of online.keys()) send(id, obj); };
+
+function readBody(req, max) {   // читает тело; при превышении лимита дочитывает до конца (чтобы можно было ответить 413), но не копит
+  return new Promise((resolve, reject) => {
+    const chunks = []; let n = 0, over = false;
+    req.on('data', (c) => { n += c.length; if (n > max) over = true; else if (!over) chunks.push(c); });
+    req.on('end', () => (over ? reject(new Error('too big')) : resolve(Buffer.concat(chunks)))); req.on('error', reject);
+  });
 }
 
 // ---------- auth ----------
@@ -279,6 +307,7 @@ async function api(req, res, url) {
     return json(res, 200, q.allUsers.all().map((u) => {
       const l = q.lastMsg.get(me.id, u.id);
       return { id: u.id, username: u.username, last_seen: u.last_seen, self: u.id === me.id,
+        display_name: u.display_name, bio: u.bio, avatar_v: u.avatar_v, cover: u.cover,
         unread: u.id === me.id ? 0 : q.unreadCount.get(u.id, me.id).n,
         last: l ? { id: l.id, from_id: l.from_id, text: l.text, created_at: l.created_at, file: l.fmime ? { mime: l.fmime, name: l.fname } : null } : null };
     }));
@@ -288,9 +317,39 @@ async function api(req, res, url) {
     if (q.userById.get(peer) && Number.isInteger(upto) && upto > 0) q.setRead.run(me.id, peer, upto);
     return json(res, 200, { ok: true });
   }
+  if (url.pathname === '/api/me' && req.method === 'PUT') {
+    const b = await readJson(req);
+    const name = cleanText(b.display_name, 30), bio = cleanText(b.bio, 140), cover = COVER_RE.test(String(b.cover || '')) ? b.cover : null;
+    q.setProfile.run(name || null, bio || null, cover, me.id);
+    broadcastAll({ type: 'profile', user: publicProfile(me.id) });
+    return json(res, 200, publicProfile(me.id));
+  }
+  if (url.pathname === '/api/avatar' && req.method === 'POST') {
+    if (Number(req.headers['content-length'] || 0) > 20 * 1024 * 1024) { req.destroy(); return; }   // явный мусор не дочитываем
+    let buf; try { buf = await readBody(req, 1024 * 1024); } catch { return json(res, 413, { error: 'Фото больше 1 МБ' }); }
+    if (!sniffImage(buf)) return json(res, 400, { error: 'Нужна картинка JPEG, PNG или WebP' });
+    fs.writeFileSync(path.join(AVATAR_DIR, String(me.id)), buf);
+    const v = Date.now(); q.setAvatarV.run(v, me.id);
+    broadcastAll({ type: 'profile', user: publicProfile(me.id) });
+    return json(res, 200, { ok: true, avatar_v: v });
+  }
+  if (url.pathname === '/api/avatar' && req.method === 'DELETE') {
+    fs.rmSync(path.join(AVATAR_DIR, String(me.id)), { force: true }); q.setAvatarV.run(null, me.id);
+    broadcastAll({ type: 'profile', user: publicProfile(me.id) });
+    return json(res, 200, { ok: true });
+  }
+  if (url.pathname.startsWith('/api/avatar/') && req.method === 'GET') {
+    const uid = Number(url.pathname.slice(12)), file = path.join(AVATAR_DIR, String(uid));
+    if (!Number.isInteger(uid) || !fs.existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
+    const buf = fs.readFileSync(file), mime = sniffImage(buf);
+    if (!mime) { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200, { 'Content-Type': mime, 'Content-Length': buf.length, 'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "sandbox; default-src 'none'", 'Cache-Control': 'private, max-age=31536000, immutable' });
+    return res.end(buf);
+  }
   if (url.pathname === '/api/upload' && req.method === 'POST') return await handleUpload(req, res, me, url);
   if (url.pathname.startsWith('/api/file/') && (req.method === 'GET' || req.method === 'HEAD')) return serveFile(req, res, me, url, url.pathname.slice(10));
-  if (url.pathname === '/api/me') return json(res, 200, me);
+  if (url.pathname === '/api/me') return json(res, 200, publicProfile(me.id));
   if (url.pathname === '/api/users') return json(res, 200, q.allUsers.all().filter((u) => u.id !== me.id));
   if (url.pathname === '/api/messages') {
     const other = Number(url.searchParams.get('with')), before = Number(url.searchParams.get('before') || 0);
@@ -357,7 +416,7 @@ wss.on('connection', (ws) => {
     send(me.id, { type: 'msg', msg, cid: m.cid });
     // push, если получатель сейчас не смотрит в приложение (iOS требует показывать каждое push-уведомление)
     const watching = [...(online.get(to) || [])].some((w) => w.visible === true);
-    if (to !== me.id && !watching) pushTo(to, { title: me.username, body: text.slice(0, 200), from: me.id });
+    if (to !== me.id && !watching) pushTo(to, { title: me.display_name || me.username, body: text.slice(0, 200), from: me.id });
   });
   ws.on('close', () => {
     online.get(me.id)?.delete(ws);

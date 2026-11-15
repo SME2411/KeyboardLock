@@ -19,10 +19,13 @@
   var d = document.documentElement;
   var dark = s.mode === 'dark' || ((s.mode || 'system') === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
   d.dataset.mode = dark ? 'dark' : 'light'; d.dataset.style = s.style || 'graphite';
-  d.dataset.anim = s.anim || 'full'; d.dataset.emojiAnim = s.emojiAnim === false ? 'off' : 'on'; d.dataset.fs = s.fontSize || 'm';
+  d.dataset.anim = s.anim || 'full'; d.dataset.wall = s.wall || 'doodle'; d.dataset.emojiAnim = s.emojiAnim === false ? 'off' : 'on'; d.dataset.fs = s.fontSize || 'm';
+  var w = s.wall === 'custom' ? localStorage.getItem('duoverse.wallpaperImg') : null; if (w) d.style.setProperty('--wall-custom', 'url(' + w + ')');
+  d.style.setProperty('--wall-dim', (s.wallDim || 0) / 100); d.style.setProperty('--wall-blur', (s.wallBlur ? 8 : 0) + 'px');
 })();
 </script>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/themes.css">
 </head>
 <body>
 <section id="auth" hidden>
@@ -42,6 +45,7 @@
 <section id="app" hidden data-view="list">
   <aside id="side">
     <header class="top">
+      <button id="meBtn" class="me-btn" aria-label="Мой профиль"><div id="meAv" class="avatar sm"></div></button>
       <strong class="brand">DuoVerse</strong>
       <button id="settingsBtn" class="icon-btn" aria-label="Настройки">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
@@ -55,10 +59,11 @@
     <div id="chat" hidden>
       <header class="top">
         <button id="back" class="icon-btn" aria-label="Назад">←</button>
-        <div id="avatar" class="avatar"></div>
-        <div class="who"><strong id="title"></strong><small id="status"></small></div>
+        <div id="avatar" class="avatar sm"></div>
+        <button class="who" id="whoBtn" type="button"><strong id="title"></strong><small id="status"></small></button>
       </header>
-      <div id="messages"></div>
+      <div id="wall"></div>
+    <div id="messages"></div>
       <div id="emoji" hidden>
         <div id="emojiTabs"></div>
         <div id="emojiGrid"></div>

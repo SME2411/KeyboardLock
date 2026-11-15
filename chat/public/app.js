@@ -1,15 +1,17 @@
+import { THEMES } from '/themes.js';
 const $ = (id) => document.getElementById(id);
 let me, chats = [], current = null, ws, onlineIds = [], registering = false, retry = 0, actTimer = null, lastActSent = 0;
 
-const api = async (path, body) => {
-  const r = await fetch(path, body && { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const api = (path, body) => apiReq(body ? 'POST' : 'GET', path, body);
+const apiReq = async (method, path, body) => {
+  const r = await fetch(path, method === 'GET' ? undefined : { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || 'Ошибка'), { status: r.status });
   return data;
 };
 
 // ---------- настройки (хранятся на устройстве) ----------
-const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true, compress: true };
+const DEFAULTS = { mode: 'system', style: 'graphite', anim: 'full', emojiAnim: true, bigEmoji: true, fontSize: 'm', enterSends: true, showTyping: true, compress: true, wall: 'doodle', wallDim: 0, wallBlur: false };
 let settings = { ...DEFAULTS };
 try { settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('duoverse.settings') || '{}') }; } catch {}
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
@@ -17,68 +19,191 @@ function applySettings() {
   const r = document.documentElement;
   const dark = settings.mode === 'dark' || (settings.mode === 'system' && darkMq.matches);
   r.dataset.mode = dark ? 'dark' : 'light'; r.dataset.style = settings.style; r.dataset.anim = settings.anim;
-  r.dataset.emojiAnim = settings.emojiAnim ? 'on' : 'off'; r.dataset.fs = settings.fontSize;
+  r.dataset.emojiAnim = settings.emojiAnim ? 'on' : 'off'; r.dataset.fs = settings.fontSize; r.dataset.wall = settings.wall;
+  const img = settings.wall === 'custom' ? localStorage.getItem('duoverse.wallpaperImg') : null;
+  if (img) r.style.setProperty('--wall-custom', `url(${img})`); else r.style.removeProperty('--wall-custom');
+  r.style.setProperty('--wall-dim', settings.wallDim / 100); r.style.setProperty('--wall-blur', (settings.wallBlur ? 8 : 0) + 'px');
   $('themeColor').content = getComputedStyle(r).getPropertyValue('--bg').trim() || '#ffffff';
 }
 function setSetting(k, v) { settings[k] = v; localStorage.setItem('duoverse.settings', JSON.stringify(settings)); applySettings(); }
 darkMq.addEventListener('change', applySettings);
 
-const SCHEMA = [
-  { sec: 'Оформление' },
-  { k: 'mode', t: 'seg', label: 'Тема', opts: [['system', 'Как в телефоне'], ['light', 'Светлая'], ['dark', 'Тёмная']] },
-  { k: 'style', t: 'seg', label: 'Стиль', opts: [['graphite', 'Графит'], ['slate', 'Сланец'], ['amber', 'Янтарь']] },
-  { k: 'fontSize', t: 'seg', label: 'Размер текста', opts: [['s', 'Мелкий'], ['m', 'Обычный'], ['l', 'Крупный']] },
-  { sec: 'Анимации' },
-  { k: 'anim', t: 'seg', label: 'Анимации', opts: [['full', 'Полные'], ['min', 'Минимум'], ['off', 'Выкл']] },
-  { k: 'emojiAnim', t: 'sw', label: 'Анимация эмодзи', hint: 'Крупные эмодзи «подпрыгивают» при получении' },
-  { k: 'bigEmoji', t: 'sw', label: 'Крупные эмодзи', hint: '1–3 эмодзи показываются без пузырька', reopen: true },
-  { sec: 'Чат' },
-  { k: 'enterSends', t: 'sw', label: 'Enter отправляет', hint: 'На компьютере; Shift+Enter — новая строка' },
-  { k: 'showTyping', t: 'sw', label: 'Показывать, что я печатаю', hint: 'Если выключить, собеседник не увидит «печатает…»' },
-  { k: 'compress', t: 'sw', label: 'Сжимать фото при отправке', hint: 'Меньше трафика, и пропадают метаданные (в т.ч. место съёмки)' },
-];
-function openSettings() {
+// ---------- боковая панель (настройки, профиль) ----------
+function openSheet(title) {
   const sh = $('sheet'); sh.innerHTML = '';
   const head = document.createElement('div'); head.className = 'sheet-head';
-  head.innerHTML = '<h2>Настройки</h2>'; const x = document.createElement('button'); x.className = 'icon-btn'; x.textContent = '✕'; x.setAttribute('aria-label', 'Закрыть');
-  x.onclick = closeSettings; head.append(x); sh.append(head);
-  for (const it of SCHEMA) {
-    if (it.sec) { const s = document.createElement('div'); s.className = 'sec'; s.textContent = it.sec; sh.append(s); continue; }
-    const row = document.createElement('div'); row.className = 'row' + (it.t === 'sw' ? ' inline' : '');
-    const lab = document.createElement('div'); lab.textContent = it.label;
-    if (it.hint) { const h = document.createElement('small'); h.textContent = it.hint; lab.append(h); }
-    if (it.t === 'seg') {
-      const seg = document.createElement('div'); seg.className = 'seg';
-      for (const [val, text] of it.opts) {
-        const b = document.createElement('button'); b.type = 'button'; b.textContent = text; b.classList.toggle('active', settings[it.k] === val);
-        b.onclick = () => { setSetting(it.k, val); [...seg.children].forEach((c) => c.classList.toggle('active', c === b)); };
-        seg.append(b);
-      }
-      row.append(lab, seg);
-    } else {
-      const sw = document.createElement('button'); sw.type = 'button'; sw.className = 'sw'; sw.setAttribute('role', 'switch'); sw.setAttribute('aria-checked', String(!!settings[it.k]));
-      sw.onclick = () => { setSetting(it.k, !settings[it.k]); sw.setAttribute('aria-checked', String(!!settings[it.k])); if (it.reopen && current) openChat(current); };
-      row.append(lab, sw);
-    }
-    sh.append(row);
-  }
-  // уведомления и аккаунт
-  const s = document.createElement('div'); s.className = 'sec'; s.textContent = 'Уведомления и аккаунт'; sh.append(s);
-  const nrow = document.createElement('div'); nrow.className = 'row inline';
-  const nl = document.createElement('div'); nl.textContent = 'Push-уведомления'; const nh = document.createElement('small'); nl.append(nh);
-  const nb = document.createElement('button'); nb.className = 'btn'; nrow.append(nl, nb); sh.append(nrow);
-  refreshPushRow(nh, nb);
-  const arow = document.createElement('div'); arow.className = 'row inline';
-  const al = document.createElement('div'); al.textContent = 'Вы вошли как ' + me.username;
-  const lo = document.createElement('button'); lo.className = 'btn danger'; lo.textContent = 'Выйти'; lo.onclick = logout;
-  arow.append(al, lo); sh.append(arow);
-  const pad = document.createElement('div'); pad.className = 'pad'; sh.append(pad);
-  $('settings').hidden = false;
+  const h = document.createElement('h2'); h.textContent = title;
+  const x = document.createElement('button'); x.className = 'icon-btn'; x.textContent = '✕'; x.setAttribute('aria-label', 'Закрыть'); x.onclick = closeSettings;
+  head.append(h, x); sh.append(head); $('settings').hidden = false; return sh;
 }
 const closeSettings = () => { $('settings').hidden = true; };
+const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const section = (sh, text) => sh.append(mk('div', 'sec', text));
+function segRow(sh, k, label, opts, onChange) {
+  const row = mk('div', 'row'); row.append(mk('div', '', label));
+  const seg = mk('div', 'seg');
+  for (const [val, text] of opts) {
+    const b = mk('button', '', text); b.type = 'button'; b.classList.toggle('active', settings[k] === val);
+    b.onclick = () => { setSetting(k, val); [...seg.children].forEach((c) => c.classList.toggle('active', c === b)); onChange?.(); };
+    seg.append(b);
+  }
+  row.append(seg); sh.append(row);
+}
+function switchRow(sh, k, label, hint, onChange) {
+  const row = mk('div', 'row inline'), lab = mk('div', '', label);
+  if (hint) lab.append(mk('small', '', hint));
+  const sw = mk('button', 'sw'); sw.type = 'button'; sw.setAttribute('role', 'switch'); sw.setAttribute('aria-checked', String(!!settings[k]));
+  sw.onclick = () => { setSetting(k, !settings[k]); sw.setAttribute('aria-checked', String(!!settings[k])); onChange?.(); };
+  row.append(lab, sw); sh.append(row);
+}
+const isDarkNow = () => document.documentElement.dataset.mode === 'dark';
+
+const WALLS = [['doodle', 'Узор'], ['dots', 'Точки'], ['grid', 'Сетка'], ['g1', 'Градиент 1'], ['g2', 'Градиент 2'], ['g3', 'Градиент 3'], ['none', 'Без фона'], ['custom', 'Своё фото']];
+function openSettings() {
+  const sh = openSheet('Настройки');
+  section(sh, 'Оформление');
+  segRow(sh, 'mode', 'Режим', [['system', 'Как в телефоне'], ['light', 'Светлый'], ['dark', 'Тёмный']], () => { renderThemes(); });
+  const trow = mk('div', 'row'); trow.append(mk('div', '', 'Тема')); sh.append(trow);
+  const gal = mk('div', 'themes'); sh.append(gal);
+  function renderThemes() {
+    gal.innerHTML = '';
+    for (const t of THEMES) {
+      const b = mk('button', 'theme' + (settings.style === t.id ? ' active' : '')); b.type = 'button';
+      const c = isDarkNow() ? t.dark : t.light, sw = document.createElement('i');
+      sw.style.background = `linear-gradient(135deg, ${c.bg} 50%, ${c.acc} 50%)`;
+      b.append(sw, mk('span', '', t.name)); b.onclick = () => { setSetting('style', t.id); renderThemes(); renderWalls(); }; gal.append(b);
+    }
+  }
+  renderThemes();
+  segRow(sh, 'fontSize', 'Размер текста', [['s', 'Мелкий'], ['m', 'Обычный'], ['l', 'Крупный']]);
+
+  section(sh, 'Обои чата');
+  const wgrid = mk('div', 'walls'); sh.append(wgrid);
+  const fileIn = document.createElement('input'); fileIn.type = 'file'; fileIn.accept = 'image/*'; fileIn.hidden = true; sh.append(fileIn);
+  function renderWalls() {
+    wgrid.innerHTML = '';
+    for (const [id, name] of WALLS) {
+      const b = mk('button', 'wall' + (settings.wall === id ? ' active' : '')); b.type = 'button';
+      const prev = document.createElement('i'); prev.dataset.w = id; b.append(prev, mk('span', '', name));
+      // превью каждого обоя: временно подменяем переменные только внутри кнопки
+      b.dataset.wall = id; b.onclick = () => { if (id === 'custom') { fileIn.click(); return; } setSetting('wall', id); renderWalls(); };
+      wgrid.append(b);
+    }
+  }
+  renderWalls();
+  fileIn.onchange = async () => {
+    const f = fileIn.files[0]; if (!f) return;
+    try { localStorage.setItem('duoverse.wallpaperImg', await resizeToDataUrl(f, 1600, 0.82)); setSetting('wall', 'custom'); renderWalls(); }
+    catch (e) { alert('Не удалось поставить фон: ' + (e.name === 'QuotaExceededError' ? 'слишком большое фото' : 'неподдерживаемая картинка')); }
+    fileIn.value = '';
+  };
+  const drow = mk('div', 'row'); drow.append(mk('div', '', 'Затемнение фона'));
+  const rng = document.createElement('input'); rng.type = 'range'; rng.min = 0; rng.max = 70; rng.value = settings.wallDim;
+  rng.oninput = () => setSetting('wallDim', Number(rng.value)); drow.append(rng); sh.append(drow);
+  switchRow(sh, 'wallBlur', 'Размытие фона', 'Хорошо для яркого своего фото');
+
+  section(sh, 'Анимации');
+  segRow(sh, 'anim', 'Анимации', [['full', 'Полные'], ['min', 'Минимум'], ['off', 'Выкл']]);
+  switchRow(sh, 'emojiAnim', 'Анимация эмодзи', 'Крупные эмодзи «подпрыгивают» при получении');
+  switchRow(sh, 'bigEmoji', 'Крупные эмодзи', '1–3 эмодзи показываются без пузырька', () => { if (current) openChat(current); });
+
+  section(sh, 'Чат');
+  switchRow(sh, 'enterSends', 'Enter отправляет', 'На компьютере; Shift+Enter — новая строка');
+  switchRow(sh, 'showTyping', 'Показывать, что я печатаю', 'Если выключить, собеседник не увидит «печатает…»');
+  switchRow(sh, 'compress', 'Сжимать фото при отправке', 'Меньше трафика, и пропадают метаданные (в т.ч. место съёмки)');
+
+  section(sh, 'Уведомления и аккаунт');
+  const nrow = mk('div', 'row inline'), nl = mk('div', '', 'Push-уведомления'), nh = mk('small'); nl.append(nh);
+  const nb = mk('button', 'btn'); nrow.append(nl, nb); sh.append(nrow); refreshPushRow(nh, nb);
+  const prow = mk('div', 'row inline'); prow.append(mk('div', '', 'Мой профиль'));
+  const pb = mk('button', 'btn', 'Открыть'); pb.onclick = openProfile; prow.append(pb); sh.append(prow);
+  const arow = mk('div', 'row inline'); arow.append(mk('div', '', 'Вы вошли как ' + me.username));
+  const lo = mk('button', 'btn danger', 'Выйти'); lo.onclick = logout; arow.append(lo); sh.append(arow);
+  sh.append(mk('div', 'pad'));
+}
 $('sheetBg').onclick = closeSettings;
 $('settingsBtn').onclick = openSettings;
 addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+
+// уменьшает картинку и отдаёт data-URL (для фона) или Blob (для аватарки)
+async function resizeImage(file, max, quality, square) {
+  const bmp = await createImageBitmap(file);
+  let sw = bmp.width, sh = bmp.height, sx = 0, sy = 0;
+  if (square) { const m = Math.min(sw, sh); sx = (sw - m) / 2; sy = (sh - m) / 2; sw = sh = m; }
+  const k = Math.min(1, max / Math.max(sw, sh)), cw = Math.round(sw * k), ch = Math.round(sh * k);
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch; c.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, cw, ch);
+  bmp.close?.(); return new Promise((r) => c.toBlob(r, 'image/jpeg', quality));
+}
+async function resizeToDataUrl(file, max, quality) {
+  const blob = await resizeImage(file, max, quality, false);
+  return await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+}
+
+// ---------- профиль ----------
+const COVERS = { c1: ['#334155', '#64748b'], c2: ['#0f766e', '#2dd4bf'], c3: ['#1d4ed8', '#60a5fa'], c4: ['#4338ca', '#a5b4fc'], c5: ['#7c2d12', '#fb923c'], c6: ['#14532d', '#86efac'], c7: ['#111827', '#6b7280'], c8: ['#854d0e', '#fde047'], c9: ['#3f3f46', '#a1a1aa'] };
+const coverCss = (id) => COVERS[id] ? `linear-gradient(135deg, ${COVERS[id][0]}, ${COVERS[id][1]})` : '';
+const dispName = (u) => u.display_name || u.username;
+function fillAvatar(el, u) {   // фото, если есть, иначе первая буква
+  el.style.backgroundImage = ''; el.classList.remove('img'); el.textContent = dispName(u)[0].toUpperCase();
+  if (u.avatar_v) { el.style.backgroundImage = `url(/api/avatar/${u.id}?v=${u.avatar_v})`; el.classList.add('img'); }
+}
+function openProfile() {
+  const sh = openSheet('Мой профиль');
+  const draft = { display_name: me.display_name || '', bio: me.bio || '', cover: me.cover || '' };
+  const cover = mk('div', 'prof-cover'); cover.style.setProperty('--cover', coverCss(draft.cover) || ''); if (!draft.cover) cover.style.removeProperty('--cover');
+  const av = mk('div', 'avatar prof-av'); fillAvatar(av, me);
+  const cam = mk('button', 'cam'); cam.type = 'button'; cam.setAttribute('aria-label', 'Сменить фото');
+  cam.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>';
+  av.append(cam);
+  const fin = document.createElement('input'); fin.type = 'file'; fin.accept = 'image/*'; fin.hidden = true;
+  cam.onclick = () => fin.click();
+  fin.onchange = async () => {
+    const f = fin.files[0]; if (!f) return;
+    try {
+      const blob = await resizeImage(f, 384, 0.88, true);
+      const r = await fetch('/api/avatar', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+      if (!r.ok) throw new Error((await r.json()).error || 'Ошибка');
+    } catch (e) { alert('Фото не поставилось: ' + e.message); }
+    fin.value = '';
+  };
+  sh.append(cover, av, fin);
+  sh.append(mk('div', 'prof-sub', '@' + me.username));
+  const nameIn = Object.assign(document.createElement('input'), { maxLength: 30, placeholder: me.username, value: draft.display_name });
+  const bioIn = Object.assign(document.createElement('textarea'), { maxLength: 140, rows: 3, placeholder: 'Пара слов о себе', value: draft.bio });
+  const l1 = mk('label', 'fld', 'Имя'); l1.append(nameIn); const l2 = mk('label', 'fld', 'О себе'); l2.append(bioIn); sh.append(l1, l2);
+  section(sh, 'Цвет профиля');
+  const covers = mk('div', 'covers'); sh.append(covers);
+  const renderCovers = () => { covers.innerHTML = '';
+    for (const id of ['', ...Object.keys(COVERS)]) {
+      const b = mk('button', 'cover' + (draft.cover === id ? ' active' : '')); b.type = 'button';
+      b.style.background = id ? coverCss(id) : 'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--bg)))';
+      b.onclick = () => { draft.cover = id; if (id) cover.style.setProperty('--cover', coverCss(id)); else cover.style.removeProperty('--cover'); renderCovers(); };
+      covers.append(b);
+    } };
+  renderCovers();
+  const btns = mk('div', 'rowbtn');
+  const del = mk('button', 'btn', 'Убрать фото'); del.type = 'button'; del.onclick = async () => { await apiReq('DELETE', '/api/avatar'); };
+  const save = mk('button', 'primary', 'Сохранить'); save.type = 'button';
+  save.onclick = async () => {
+    save.disabled = true;
+    try { await apiReq('PUT', '/api/me', { display_name: nameIn.value, bio: bioIn.value, cover: draft.cover }); closeSettings(); }
+    catch (e) { alert('Не сохранилось: ' + e.message); save.disabled = false; }
+  };
+  btns.append(del, save); sh.append(btns, mk('div', 'pad'));
+  // фото обновляется «вживую»: когда сервер подтвердит, перерисуем
+  profileRefresh = () => { fillAvatar(av, me); av.append(cam); };
+}
+let profileRefresh = null;
+function openUserCard(c) {   // профиль собеседника, только просмотр
+  const sh = openSheet('Профиль');
+  const cover = mk('div', 'prof-cover'); if (c.cover && coverCss(c.cover)) cover.style.setProperty('--cover', coverCss(c.cover));
+  const av = mk('div', 'avatar prof-av'); fillAvatar(av, c);
+  sh.append(cover, av, mk('div', 'prof-name', dispName(c)), mk('div', 'prof-sub', '@' + c.username), mk('div', 'prof-sub', seenText(c)));
+  if (c.bio) sh.append(mk('div', 'prof-bio', c.bio));
+  sh.append(mk('div', 'pad'));
+}
+$('meBtn').onclick = openProfile;
+$('whoBtn').onclick = () => { if (current?.kind === 'user') openUserCard(current); else if (current?.kind === 'self') openProfile(); };
 
 async function refreshPushRow(hint, btn) {
   if (!pushSupported()) {
@@ -125,12 +250,14 @@ async function start() {
   try { me = await api('/api/me'); } catch { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth').hidden = true; $('app').hidden = false;
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+  paintMe();
   await loadChats();
   connect();
   updateBanner();
   buildEmoji();
 }
 
+function paintMe() { fillAvatar($('meAv'), me); }
 // ---------- чаты: собеседники, «Избранное» (чат с собой), служебный «DuoVerse» ----------
 const BOT_WELCOME = [
   'Добро пожаловать в DuoVerse 👋\nЭто ваш личный мессенджер на двоих: без посторонних и без рекламы.',
@@ -140,7 +267,7 @@ const BOT_WELCOME = [
   'Внешний вид, тема и анимации настраиваются кнопкой ⚙ в списке чатов.',
 ];
 const botChat = () => ({ id: -1, username: 'DuoVerse', name: 'DuoVerse', kind: 'bot', unread: localStorage.getItem('welcomeSeen') ? 0 : 1, last: null });
-const toChat = (u) => ({ ...u, kind: u.self ? 'self' : 'user', name: u.self ? 'Избранное' : u.username });
+const toChat = (u) => ({ ...u, kind: u.self ? 'self' : 'user', name: u.self ? 'Избранное' : (u.display_name || u.username) });
 async function loadChats() {
   const list = await api('/api/chats');
   chats = [...list.map(toChat), botChat()];
@@ -152,10 +279,11 @@ const refreshChats = loadChats;
 // ---------- аватарки ----------
 const BOOKMARK = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/></svg>';
 function setAvatar(el, c) {
-  el.className = 'avatar'; el.textContent = '';
+  const small = el.classList.contains('sm');
+  el.className = 'avatar' + (small ? ' sm' : ''); el.textContent = ''; el.style.backgroundImage = '';
   if (c.kind === 'self') { el.classList.add('ic'); el.innerHTML = BOOKMARK; }
   else if (c.kind === 'bot') { el.classList.add('mono-av'); el.textContent = 'D'; }
-  else { el.textContent = c.username[0].toUpperCase(); el.classList.toggle('on', onlineIds.includes(c.id)); }
+  else { fillAvatar(el, c); el.classList.toggle('on', onlineIds.includes(c.id)); }
 }
 
 // ---------- статус: в сети / был(а) / действие ----------
@@ -487,6 +615,13 @@ function connect() {
       if (d.left) { const u = chats.find((x) => x.id === d.left.id); if (u) u.last_seen = d.left.at; }
       if (d.online.some((id) => !chats.some((c) => c.id === id))) refreshChats();   // зарегистрировался новый участник
       else { renderChats(); updateStatus(); }
+    }
+    if (d.type === 'profile') {   // кто-то поменял имя, фото или «о себе»
+      const u = d.user;
+      if (u.id === me.id) { me = { ...me, ...u }; paintMe(); profileRefresh?.(); }
+      const c = chats.find((x) => x.id === u.id && x.kind !== 'bot');
+      if (c) { Object.assign(c, u); if (c.kind === 'user') c.name = dispName(u); if (current?.id === c.id) { $('title').textContent = c.name; setAvatar($('avatar'), c); } }
+      renderChats();
     }
     if (d.type === 'act') {
       activity = { from: d.from, kind: d.kind, until: Date.now() + 3500 }; updateStatus(); renderChats();
