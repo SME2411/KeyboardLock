@@ -81,6 +81,15 @@ addEventListener('popstate', (e) => {
 });
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && layers.length && topLayer() !== 'chat') backLayer(); });
 
+// iOS: клавиатура сжимает только «визуальную» область; высота приложения следует за ней, а страница не «уезжает»
+if (vv) {
+  const fit = () => {
+    document.documentElement.style.setProperty('--app-h', vv.height + 'px'); window.scrollTo(0, 0);
+    if (current) { const m = $('messages'); if (m.scrollHeight - m.scrollTop - m.clientHeight < 280) scrollDown(false); }
+  };
+  vv.addEventListener('resize', fit); vv.addEventListener('scroll', () => window.scrollTo(0, 0)); fit();
+}
+
 // ---------- боковая панель (настройки, профиль) ----------
 const sheetStack = [];   // перестройщики открытых окон: «Назад» из вложенного возвращает в предыдущее (настройки → устройства)
 function openSheet(title, rebuild, fromBack) {
@@ -179,6 +188,8 @@ function openSettings(fromBack) {
   section(sh, 'Уведомления и аккаунт');
   const nrow = mk('div', 'row inline'), nl = mk('div', '', 'Push-уведомления'), nh = mk('small'); nl.append(nh);
   const nb = mk('button', 'btn'); nrow.append(nl, nb); sh.append(nrow); refreshPushRow(nh, nb);
+  const vrow = mk('div', 'row inline'), vl = mk('div', '', 'Версия приложения'); vl.append(mk('small', '', myVer || '—'));
+  const vb = mk('button', 'btn', 'Обновить'); vb.onclick = () => location.reload(); vrow.append(vl, vb); sh.append(vrow);
   const drow2 = mk('div', 'row inline'); drow2.append(mk('div', '', 'Устройства'));
   const db = mk('button', 'btn', 'Открыть'); db.onclick = openDevices; drow2.append(db); sh.append(drow2);
   const srow = mk('div', 'row inline'), sl = mk('div', '', 'Данные на устройстве'), sn = mk('small', '', 'считаем…'); sl.append(sn);
@@ -355,8 +366,41 @@ async function logout() {
   await api('/api/logout', {}); ws?.close(); location.reload();
 }
 
+function openChatById(id) { const c = chats.find((x) => x.id === Number(id) && x.kind !== 'bot'); if (c) { if (hasLayer('sheet')) closeLayers('sheet'); openChat(c); } }
+navigator.serviceWorker?.addEventListener('message', (e) => { if (e.data?.type === 'open') openChatById(e.data.from); });
+
+// ---------- новая версия приложения и обновление ----------
+let myVer = null;
+async function checkVersion() {
+  try {
+    const { v } = await (await fetch('/api/version', { cache: 'no-store' })).json();
+    if (myVer === null) myVer = v; else if (v !== myVer) $('updbar').hidden = false;
+  } catch {}
+}
+$('updBtn').onclick = () => location.reload();
+setInterval(checkVersion, 5 * 60 * 1000);
+// свайп вниз на списке чатов = обновить приложение
+(() => {
+  const list = $('contacts'), box = $('ptr'), txt = $('ptrText'); let y0 = null, dy = 0;
+  list.addEventListener('touchstart', (e) => { y0 = list.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; dy = 0; }, { passive: true });
+  list.addEventListener('touchmove', (e) => {
+    if (y0 === null) return; dy = e.touches[0].clientY - y0;
+    if (dy > 0 && list.scrollTop <= 0) { box.hidden = false; box.classList.add('pull'); box.style.height = Math.min(dy * 0.5, 64) + 'px'; txt.textContent = dy > 120 ? 'Отпустите для обновления' : 'Потяните, чтобы обновить'; }
+  }, { passive: true });
+  const end = () => {
+    if (y0 === null) return; box.classList.remove('pull');
+    if (dy > 120) { txt.textContent = 'Обновляем…'; box.style.height = '48px'; setTimeout(() => location.reload(), 250); } else box.style.height = '0';
+    y0 = null;
+  };
+  list.addEventListener('touchend', end); list.addEventListener('touchcancel', end);
+})();
+
+// подсказка по установке на iPhone: без неё нет ни уведомлений, ни нормального приложения
+function maybeShowInstall() { if (isIOS() && !isStandalone() && !sessionStorage.getItem('instSkip')) $('install').hidden = false; }
+$('instSkip').onclick = () => { sessionStorage.setItem('instSkip', '1'); $('install').hidden = true; };
+
 async function start() {
-  applySettings();
+  applySettings(); maybeShowInstall(); checkVersion();
   try { me = await api('/api/me'); } catch { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth').hidden = true; $('app').hidden = false;
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
@@ -364,6 +408,7 @@ async function start() {
   paintMe();
   await loadChats();
   connect();
+  { const c = new URLSearchParams(location.search).get('c'); if (c) { openChatById(c); history.replaceState(history.state, '', '/'); } }
   updateBanner();
   buildEmoji();
 }
@@ -472,7 +517,13 @@ function listTime(ts) {
   if (now - d < 6 * 864e5) return d.toLocaleDateString('ru', { weekday: 'short' });
   return d.toLocaleDateString('ru', { day: '2-digit', month: '2-digit' });
 }
+function setBadge() {   // число непрочитанных на значке иконки и в заголовке
+  const n = chats.reduce((a, c) => a + (c.kind === 'user' ? (c.unread || 0) : 0), 0);
+  try { if (n) navigator.setAppBadge?.(n); else navigator.clearAppBadge?.(); } catch {}
+  document.title = n ? `(${n}) DuoVerse` : 'DuoVerse';
+}
 function renderChats() {
+  setBadge();
   const box = $('contacts'); box.innerHTML = '';
   const order = { user: 0, self: 1, bot: 2 };
   const list = [...chats].sort((a, b) => order[a.kind] - order[b.kind] || (b.last?.created_at || 0) - (a.last?.created_at || 0));
@@ -716,7 +767,7 @@ function fit(f, maxW = 320, maxH = 380) {
   const k = Math.min(maxW / f.w, maxH / f.h, 1); return { w: Math.round(f.w * k), h: Math.round(f.h * k) };
 }
 function docNode(f) {
-  const a = document.createElement('a'); a.className = 'doc'; a.href = fileUrl(f, true); a.download = f.name;
+  const a = document.createElement('a'); a.className = 'doc'; a.href = fileUrl(f, true); a.download = f.name; a.target = '_blank'; a.rel = 'noopener';
   const ic = document.createElement('div'); ic.className = 'ic'; ic.textContent = (f.name.includes('.') ? f.name.split('.').pop() : 'FILE').slice(0, 4).toUpperCase();
   const tx = document.createElement('div'); const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = f.name;
   const sm = document.createElement('small'); sm.textContent = fmtSize(f.size); tx.append(nm, sm); a.append(ic, tx); return a;
@@ -739,7 +790,7 @@ function fileNode(f) {
   return docNode(f);
 }
 function openLightbox(f) {
-  const lb = $('lightbox'); lb.querySelector('img').src = fileUrl(f); $('lbDl').href = fileUrl(f, true); $('lbDl').download = f.name; lb.hidden = false;
+  const lb = $('lightbox'); lb.querySelector('img').src = fileUrl(f); $('lbDl').href = fileUrl(f, true); $('lbDl').download = f.name; $('lbDl').target = '_blank'; lb.hidden = false;
   pushLayer('lightbox', () => { lb.hidden = true; });
 }
 $('lightbox').onclick = (e) => { if (e.target.id !== 'lbDl' && topLayer() === 'lightbox') backLayer(); };
@@ -859,10 +910,19 @@ $('sendBtn').addEventListener('pointerdown', (e) => e.preventDefault());
 const isVisible = () => !document.hidden && document.hasFocus();
 const sendVis = () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'vis', visible: isVisible() })); };
 ['visibilitychange', 'focus', 'blur'].forEach((ev) => addEventListener(ev, sendVis));
+setInterval(() => { if (isVisible()) sendVis(); }, 12000);   // «я на экране»: iOS замораживает вкладку без предупреждения, сервер по свежести сердцебиения понимает, слать ли push
+addEventListener('pagehide', () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'vis', visible: false })); });
+let hiddenAt = 0, everConnected = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (hiddenAt && Date.now() - hiddenAt > 4000) reconnectNow();   // после долгого сна соединение «мёртвое», хотя выглядит открытым
+  hiddenAt = 0; checkVersion();
+});
+function reconnectNow() { try { if (ws) { ws.onclose = null; ws.close(); } } catch {} connect(); }
 
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { retry = 0; sendVis(); if (current) openChat(current); };
+  ws.onopen = () => { retry = 0; sendVis(); if (everConnected) loadChats(); everConnected = true; if (current) openChat(current); };
   ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
     if (d.type === 'presence') {
@@ -919,7 +979,6 @@ function connect() {
   };
   ws.onclose = () => { setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000)); };
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden && ws?.readyState !== 1) { ws?.close(); connect(); } });
 addEventListener('focus', () => { if (current) markRead(current); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && current) markRead(current); });
 

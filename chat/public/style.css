@@ -7,7 +7,8 @@
 :root[data-fs="s"] { --fs: 14.5px; } :root[data-fs="l"] { --fs: 18px; }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { height: 100%; margin: 0; }
+html, body { height: 100%; margin: 0; overscroll-behavior: none; -webkit-text-size-adjust: 100%; touch-action: manipulation; }
+body { position: fixed; inset: 0; width: 100%; }
 body { color: var(--text); background: var(--bg); font: var(--fs)/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; transition: background .25s, color .25s; }
 [hidden] { display: none !important; }
 button, input, textarea { font: inherit; color: inherit; }
@@ -19,16 +20,16 @@ button { cursor: pointer; }
 .mono { width: 56px; height: 56px; margin: 0 auto; border-radius: 18px; display: grid; place-items: center; font-weight: 700; font-size: 26px; background: var(--me); color: var(--me-text); }
 h1 { margin: 0; text-align: center; font-size: 26px; letter-spacing: -.01em; }
 .sub { margin: -6px 0 6px; text-align: center; color: var(--muted); font-size: 14px; }
-input, textarea { background: var(--input); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; outline: none; transition: border-color .2s; }
+input, textarea { font-size: max(16px, var(--fs)); background: var(--input); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; outline: none; transition: border-color .2s; }
 input:focus, textarea:focus { border-color: var(--accent); }
 #authBtn, .primary { background: var(--me); color: var(--me-text); border: 0; border-radius: 14px; padding: 12px; font-weight: 600; transition: transform .12s, opacity .2s; }
-#authBtn:hover, .primary:hover { opacity: .9; } #authBtn:active, .primary:active { transform: scale(.98); }
+@media (hover: hover) { #authBtn:hover, .primary:hover { opacity: .9; } } #authBtn:active, .primary:active { transform: scale(.98); }
 #toggle { color: var(--muted); text-align: center; font-size: 14px; }
 .err { color: var(--danger); min-height: 1.2em; margin: 0; text-align: center; font-size: 14px; }
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
 /* ---------- каркас: список и чат ---------- */
-#app { height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); background: var(--bg); }
+#app { height: var(--app-h, 100dvh); display: grid; grid-template-columns: minmax(0, 1fr); background: var(--bg); }
 #side, #main { min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 #app[data-view="chat"] #side { display: none; }
 #app:not([data-view="chat"]) #main { display: none; }
@@ -46,7 +47,7 @@ button.who { background: none; border: 0; padding: 0; }
 .who small { color: var(--muted); font-size: .82em; min-height: 1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .who small.live { color: var(--online); }
 .icon-btn { background: none; border: 0; font-size: 22px; padding: 8px; border-radius: 50%; display: grid; place-items: center; transition: transform .12s, background .2s; }
-.icon-btn:hover { background: var(--them); } .icon-btn:active { transform: scale(.9); }
+@media (hover: hover) { .icon-btn:hover { background: var(--them); } } .icon-btn:active { transform: scale(.9); }
 .me-btn { padding: 0; border-radius: 50%; border: 0; background: none; }
 #empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 14px; color: var(--muted); background: var(--chatbg); }
 #empty p { margin: 0; }
@@ -66,7 +67,7 @@ button.who { background: none; border: 0; padding: 0; }
 /* ---------- список чатов ---------- */
 #contacts { padding: 6px 8px; overflow: auto; flex: 1; }
 .contact { padding: 10px 12px; border-radius: 16px; display: flex; align-items: center; gap: 13px; transition: background .15s; cursor: pointer; }
-.contact:hover { background: var(--them); } .contact:active { background: var(--line); }
+@media (hover: hover) { .contact:hover { background: var(--them); } } .contact:active { background: var(--line); }
 .contact.active { background: var(--me); color: var(--me-text); }
 .contact.active .pv, .contact.active time { color: inherit; opacity: .72; }
 .contact.active .unread { background: var(--me-text); color: var(--me); }
@@ -150,7 +151,7 @@ button.who { background: none; border: 0; padding: 0; }
 #emojiTabs button.active { opacity: 1; background: var(--them); }
 #emojiGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); height: 210px; overflow-y: auto; padding: 6px 8px 10px; background: var(--them); }
 #emojiGrid button { background: none; border: 0; font-size: 26px; padding: 4px; border-radius: 10px; transition: transform .12s; }
-#emojiGrid button:hover { background: var(--line); transform: scale(1.15); } #emojiGrid button:active { transform: scale(.9); }
+@media (hover: hover) { #emojiGrid button:hover { background: var(--line); transform: scale(1.15); } } #emojiGrid button:active { transform: scale(.9); }
 #composer { display: flex; align-items: flex-end; gap: 6px; padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: var(--bg); box-shadow: 0 -1px 0 var(--line); position: relative; z-index: 2; }
 #composer textarea { flex: 1; min-width: 0; resize: none; max-height: 130px; border-radius: 22px; padding: 11px 16px; line-height: 1.3; overflow-y: hidden; scrollbar-width: none; }
 #composer textarea::-webkit-scrollbar { display: none; }
@@ -241,6 +242,21 @@ label.fld textarea { resize: none; }
 @media (max-width: 799px) { #menuBox { left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); } }
 .menu-react { display: flex; justify-content: space-around; padding: 8px 6px; border-bottom: 1px solid var(--line); }
 .menu-react button { background: none; border: 0; font-size: 26px; padding: 4px 6px; border-radius: 12px; transition: transform .12s; }
-.menu-react button:hover { transform: scale(1.2); } .menu-react button.on { background: var(--them); }
+@media (hover: hover) { .menu-react button:hover { transform: scale(1.2); } } .menu-react button.on { background: var(--them); }
 .menu-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 13px 18px; font-size: 1rem; }
-.menu-item:hover { background: var(--them); } .menu-item.danger { color: var(--danger); }
+@media (hover: hover) { .menu-item:hover { background: var(--them); } } .menu-item.danger { color: var(--danger); }
+
+/* iOS и касания */
+#contacts, #messages, #sheet, #emojiGrid { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+@media (pointer: coarse) { .icon-btn { min-width: 44px; min-height: 44px; } .contact { padding: 11px 12px; } }
+#ptr { height: 0; overflow: hidden; display: grid; place-items: center; color: var(--muted); font-size: .88em; transition: height .18s; flex: none; }
+#ptr.pull { transition: none; }
+#updbar { position: fixed; top: max(10px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 45; display: flex; align-items: center; gap: 12px; background: var(--text); color: var(--bg); padding: 8px 8px 8px 16px; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,.3); animation: rise .3s; white-space: nowrap; }
+#updbar button { background: var(--bg); color: var(--text); border: 0; border-radius: 10px; padding: 7px 14px; font-weight: 600; }
+#install { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: grid; place-items: center; padding: 20px; overflow: auto; }
+.inst-card { max-width: 380px; display: flex; flex-direction: column; gap: 10px; text-align: center; }
+.inst-card h2 { margin: 6px 0 0; font-size: 1.35em; } .inst-card p { margin: 0; color: var(--muted); }
+.inst-card ol { text-align: left; margin: 8px 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+.inst-card ol li::marker { font-weight: 700; color: var(--accent); }
+.inst-card .note { font-size: .88em; }
+.inst-card .link-btn { background: var(--them); border: 0; border-radius: 14px; padding: 13px; color: var(--text); font-weight: 600; margin-top: 6px; }

@@ -20,7 +20,15 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'chat.db');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(path.dirname(DB_PATH), 'uploads');
 const MAX_FILE = Number(process.env.MAX_FILE_MB || 100) * 1024 * 1024;        // максимум на один файл
 const MAX_STORAGE = Number(process.env.MAX_STORAGE_GB || 15) * 1024 ** 3;       // максимум на все файлы вместе
+const VIS_TTL = Number(process.env.VIS_TTL_MS || 30000);   // как долго «я на экране» считается свежим без сердцебиения
 
+function computeVersion() {
+  if (process.env.APP_VERSION) return process.env.APP_VERSION;
+  const h = crypto.createHash('sha1');
+  for (const f of fs.readdirSync(PUBLIC).sort()) { const fp = path.join(PUBLIC, f); if (fs.statSync(fp).isFile()) h.update(f).update(fs.readFileSync(fp)); }
+  return h.digest('hex').slice(0, 8);
+}
+const APP_VERSION = computeVersion();
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const AVATAR_DIR = path.join(UPLOAD_DIR, 'avatars'); fs.mkdirSync(AVATAR_DIR, { recursive: true });
@@ -72,6 +80,7 @@ const q = {
   sessionsOf: db.prepare('SELECT token, ua, created_at, last_active FROM sessions WHERE user_id = ? ORDER BY COALESCE(last_active, created_at) DESC'),
   delSessionByToken: db.prepare('DELETE FROM sessions WHERE token = ? AND user_id = ?'),
   delSubsBySid: db.prepare('DELETE FROM push_subs WHERE user_id = ? AND sid = ?'),
+  allPeers: db.prepare('SELECT id FROM users WHERE id != ?'),
   peerRead: db.prepare('SELECT last_id FROM reads WHERE user_id = ? AND peer_id = ?'),
   sessionUser: db.prepare('SELECT u.id, u.username, u.display_name, u.bio, u.avatar_v, u.cover FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
@@ -156,6 +165,7 @@ const rowToMsg = (r) => ({
   ...(r.reply_to ? { reply_to: r.reply_to, reply: r.rid ? { id: r.rid, from_id: r.rfrom, text: snippet(r.rtext), file: r.rmime ? { mime: r.rmime, name: r.rname } : null } : { id: r.reply_to, deleted: true } } : {}),
   reactions: q.getReact.all(r.id),
 });
+const totalUnread = (uid) => q.allPeers.all(uid).reduce((n, u) => n + q.unreadCount.get(u.id, uid).n, 0);
 const fullMsg = (id) => rowToMsg(q.oneMsg.get(id));
 const pairSend = (a, b, obj) => { send(a, obj); if (b !== a) send(b, obj); };   // обоим участникам (себе в «Избранном» — один раз)
 // проверка: ответ можно давать только на сообщение из этой же переписки
@@ -195,7 +205,7 @@ async function handleUpload(req, res, me, url) {
   const msg = fullMsg(Number(r.lastInsertRowid));
   if (to !== me.id) send(to, { type: 'msg', msg });
   send(me.id, { type: 'msg', msg });
-  if (to !== me.id && ![...(online.get(to) || [])].some((x) => x.visible === true)) pushTo(to, { title: me.display_name || me.username, body: previewText(mime, name, caption), from: me.id });
+  if (to !== me.id && !isWatching(to)) pushTo(to, { title: me.display_name || me.username, body: previewText(mime, name, caption), from: me.id, badge: totalUnread(to) });
   json(res, 200, { ok: true, id: msg.id });
 }
 
@@ -323,6 +333,7 @@ const server = http.createServer(async (req, res) => {
 
 async function api(req, res, url) {
   const ip = clientIp(req);
+  if (url.pathname === '/api/version') return json(res, 200, { v: APP_VERSION });
   if (req.method === 'POST' && (url.pathname === '/api/login' || url.pathname === '/api/register')) {
     if (tooMany(ip)) return json(res, 429, { error: 'Слишком много попыток, подожди 10 минут' });
     const b = await readJson(req);
@@ -484,6 +495,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 const ACTIONS = new Set(['typing', 'voice', 'video', 'photo', 'file']);
+const isWatching = (uid) => [...(online.get(uid) || [])].some((w) => w.visible === true && Date.now() - (w.visAt || 0) < VIS_TTL);
 const send = (userId, obj) => online.get(userId)?.forEach((ws) => ws.readyState === 1 && ws.send(JSON.stringify(obj)));
 const presence = () => [...online.keys()];
 const broadcastPresence = (extra = {}) => { for (const id of online.keys()) send(id, { type: 'presence', online: presence(), ...extra }); };
@@ -498,7 +510,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (data) => {
     let m; try { m = JSON.parse(data); } catch { return; }
-    if (m.type === 'vis') { ws.visible = m.visible === true; return; }
+    if (m.type === 'vis') { ws.visible = m.visible === true; ws.visAt = Date.now(); return; }
     if (m.type === 'act') {   // действие («печатает», «записывает голосовое»…): пересылаем собеседнику, в базу не пишем
       const t = Number(m.to);
       if (ACTIONS.has(m.kind) && t !== me.id && q.userById.get(t)) send(t, { type: 'act', from: me.id, kind: m.kind });
@@ -514,8 +526,8 @@ wss.on('connection', (ws) => {
     if (to !== me.id) send(to, { type: 'msg', msg });
     send(me.id, { type: 'msg', msg, cid: m.cid });
     // push, если получатель сейчас не смотрит в приложение (iOS требует показывать каждое push-уведомление)
-    const watching = [...(online.get(to) || [])].some((w) => w.visible === true);
-    if (to !== me.id && !watching) pushTo(to, { title: me.display_name || me.username, body: text.slice(0, 200), from: me.id });
+    const watching = isWatching(to);
+    if (to !== me.id && !watching) pushTo(to, { title: me.display_name || me.username, body: text.slice(0, 200), from: me.id, badge: totalUnread(to) });
   });
   ws.on('close', () => {
     online.get(me.id)?.delete(ws);

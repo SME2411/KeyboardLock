@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff" id="themeColor">
+<meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -33,7 +34,7 @@
     <div class="mono">D</div>
     <h1>DuoVerse</h1>
     <p class="sub">Только для двоих</p>
-    <input id="username" placeholder="Имя" autocomplete="username" autocapitalize="none" required>
+    <input id="username" placeholder="Имя" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
     <input id="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
     <input id="invite" placeholder="Код приглашения" autocomplete="off" hidden>
     <button type="submit" id="authBtn">Войти</button>
@@ -52,6 +53,7 @@
       </button>
     </header>
     <div id="banner" hidden><span id="bannerText"></span><button id="bannerBtn" hidden>Включить</button></div>
+    <div id="ptr" hidden><span id="ptrText">Потяните, чтобы обновить</span></div>
     <div id="contacts"></div>
   </aside>
   <main id="main">
@@ -82,6 +84,24 @@
     </div>
   </main>
 </section>
+
+<div id="updbar" hidden><span>Вышла новая версия</span><button id="updBtn" type="button">Обновить</button></div>
+
+<div id="install" hidden>
+  <div class="inst-card">
+    <div class="mono">D</div>
+    <h2>Установите DuoVerse на iPhone</h2>
+    <p>Так он работает как обычное приложение и присылает уведомления.</p>
+    <ol>
+      <li>Нажмите <b>«Поделиться»</b> внизу Safari <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px"><path d="M12 3v12M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg></li>
+      <li>Выберите <b>«На экран «Домой»»</b></li>
+      <li>Нажмите <b>«Добавить»</b></li>
+      <li>Закройте Safari и откройте <b>DuoVerse с экрана</b></li>
+    </ol>
+    <p class="note">В приложении нужно будет войти заново: у него своё хранилище.</p>
+    <button id="instSkip" type="button" class="link-btn">Продолжить в браузере</button>
+  </div>
+</div>
 
 <div id="toast" hidden></div>
 
