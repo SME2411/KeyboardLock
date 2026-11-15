@@ -420,6 +420,7 @@ const BOT_WELCOME = [
   'Что здесь умеет:\n• сообщения в реальном времени\n• фото, видео, аудио и файлы до 100 МБ\n• эмодзи и статусы «в сети», «печатает…»\n• уведомления, даже когда приложение закрыто',
   '«Избранное» — чат с самим собой для заметок, ссылок и файлов. Там удобно пробовать любые функции.',
   'Уведомления на iPhone: в Safari нажмите «Поделиться» → «На экран «Домой»», затем открывайте DuoVerse с экрана.',
+  'Форматирование: *жирный*, _курсив_, ~зачёркнутый~, `код`, ||спойлер||. Ссылки подсвечиваются сами. Долгое нажатие на сообщение: ответ, реакция, закреп, правка, удаление.',
   'Внешний вид, тема и анимации настраиваются кнопкой ⚙ в списке чатов.',
 ];
 const botChat = () => ({ id: -1, username: 'DuoVerse', name: 'DuoVerse', kind: 'bot', unread: localStorage.getItem('welcomeSeen') ? 0 : 1, last: null });
@@ -507,7 +508,7 @@ function previewOf(c) {
   if (drafts[c.id] && current?.id !== c.id) return null;   // черновик показываем отдельным оформлением
   if (c.kind === 'user' && activeAction(c.id)) return ACTION_TEXT[activeAction(c.id)] + '…';
   if (!c.last) return c.kind === 'self' ? 'Заметки, ссылки и файлы для себя' : 'Сообщений пока нет';
-  const l = c.last, body = l.file ? fileLabel(l.file.mime, l.file.name) + (l.text ? ' ' + l.text : '') : l.text;
+  const l = c.last, body = stripFmt(l.file ? fileLabel(l.file.mime, l.file.name) + (l.text ? ' ' + l.text : '') : l.text);
   return (l.from_id === me.id && c.kind === 'user' ? 'Вы: ' : '') + body;
 }
 function listTime(ts) {
@@ -568,7 +569,7 @@ async function openChat(c) {
   $('composer').hidden = bot; $('readonly').hidden = !bot; if (bot) $('emoji').hidden = true;
   ta.value = bot ? '' : (drafts[c.id] || ''); autosize();
   $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear(); lastRendered = 0;
-  msgEls.clear(); msgData.clear(); clearComposerMode();
+  msgEls.clear(); msgData.clear(); clearComposerMode(); chatMsgs = []; unreadMarkId = null; newBelow = 0; $('toBottom').hidden = true; renderPin();
   if (bot) {
     if (!localStorage.getItem('welcomeTime')) localStorage.setItem('welcomeTime', Date.now());
     const t0 = Number(localStorage.getItem('welcomeTime'));
@@ -578,8 +579,11 @@ async function openChat(c) {
   renderChats();
   const list = await api('/api/messages?with=' + c.id);
   if (my !== openSeq) return;   // за время загрузки чат открыли заново: этот ответ устарел
-  list.forEach((m) => addMsg(m, false)); scrollDown(false);
-  markRead(c);
+  chatMsgs = list; noMoreOlder = list.length < 50; newBelow = 0; unreadMarkId = firstUnreadId(c.unread);
+  rerender(); renderPin();
+  const dv = $('unreadDiv'); if (dv) { const b = $('messages'); b.style.scrollBehavior = 'auto'; b.scrollTop = Math.max(0, dv.offsetTop - 70); } else scrollDown(false);
+  updateToBottom(); markRead(c);
+  if ($('messages').scrollTop < 140) loadOlder();   // открыли «у верхнего края»: сразу подгружаем прошлое
 }
 function markRead(c) {
   if (c.kind !== 'user' || !isVisible()) return;
@@ -593,15 +597,44 @@ function isBigEmoji(text) {
   const n = segmenter ? [...segmenter.segment(text.replace(/\s/g, ''))].length : [...text].length;
   return n >= 1 && n <= 3;
 }
+// ---------- форматирование текста: *жирный* _курсив_ ~зачёркнутый~ `код` ```блок``` ||спойлер|| и ссылки ----------
+const isW = (ch) => !!ch && /[\p{L}\p{N}_]/u.test(ch);
+const FMT_SRC = '(`[^`\\n]+`)|(\\|\\|[^\\n]+?\\|\\|)|(\\*[^\\s*][^*\\n]*?\\*)|(_[^\\s_][^_\\n]*?_)|(~[^\\s~][^~\\n]*?~)|(https?:\\/\\/[^\\s<>"\']+)';
+function inlineFmt(str) {
+  const out = [], re = new RegExp(FMT_SRC, 'g'); let last = 0, m;
+  const text = (t) => { if (t) out.push(document.createTextNode(t)); };
+  while ((m = re.exec(str))) {
+    const tok = m[0], i = m.index, mark = m[3] ? '*' : m[4] ? '_' : m[5] ? '~' : null;
+    if (mark && (isW(str[i - 1]) || isW(str[i + tok.length]))) { re.lastIndex = i + 1; continue; }   // «a*b*c» и snake_case не форматируем
+    text(str.slice(last, i)); last = i + tok.length;
+    if (m[1]) out.push(mk('code', '', tok.slice(1, -1)));
+    else if (m[2]) { const sp = mk('span', 'spoiler'); sp.append(...inlineFmt(tok.slice(2, -2))); sp.onclick = (e) => { e.stopPropagation(); sp.classList.toggle('on'); }; out.push(sp); }
+    else if (mark) { const el = document.createElement(mark === '*' ? 'strong' : mark === '_' ? 'em' : 's'); el.append(...inlineFmt(tok.slice(1, -1))); out.push(el); }
+    else {   // ссылка: хвостовую пунктуацию оставляем вне ссылки
+      let url = tok, tail = ''; while (/[.,;:!?\]»"']$/.test(url) || (url.endsWith(')') && !url.includes('('))) { tail = url.slice(-1) + tail; url = url.slice(0, -1); }
+      const a = mk('a', '', url); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.onclick = (e) => e.stopPropagation(); out.push(a); text(tail);
+    }
+  }
+  text(str.slice(last)); return out;
+}
+function renderRich(textIn) {
+  const frag = document.createDocumentFragment(), parts = String(textIn).split(/```([\s\S]*?)```/g);
+  parts.forEach((p, k) => { if (k % 2) { const pre = mk('pre'); pre.append(mk('code', '', p.replace(/^\n/, '').replace(/\n$/, ''))); frag.append(pre); } else frag.append(...inlineFmt(p)); });
+  return frag;
+}
+// то же без разметки — для превью в списке, цитатах и закрепе
+const stripFmt = (t) => String(t || '').replace(/```([\s\S]*?)```/g, '$1').replace(/`([^`\n]+)`/g, '$1').replace(/\|\|([^\n]+?)\|\|/g, '$1')
+  .replace(/(^|[^\p{L}\p{N}_])([*_~])([^\s*_~][^*_~\n]*?)\2(?![\p{L}\p{N}_])/gu, '$1$3');
+
 const msgEls = new Map(), msgData = new Map();   // id → элемент / данные сообщения
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '👎'];
 const replyName = (uid) => (uid === me.id ? 'Вы' : current?.name || 'Собеседник');
-const replyText = (r) => (r.deleted ? 'Сообщение удалено' : (r.file ? fileLabel(r.file.mime, r.file.name) + (r.text ? ' ' + r.text : '') : r.text));
+const replyText = (r) => (r.deleted ? 'Сообщение удалено' : stripFmt(r.file ? fileLabel(r.file.mime, r.file.name) + (r.text ? ' ' + r.text : '') : r.text));
 
 function quoteNode(m) {
   const q = mk('div', 'quote'); const r = m.reply;
   q.append(mk('b', '', r.deleted ? 'Ответ' : replyName(r.from_id)), mk('span', '', replyText(r)));
-  q.onclick = (e) => { e.stopPropagation(); scrollToMsg(r.id); };
+  q.onclick = (e) => { e.stopPropagation(); jumpTo(r.id); };
   return q;
 }
 function renderReacts(el, m) {
@@ -621,8 +654,8 @@ function fillMsg(el, m) {            // содержимое пузыря; вы�
   if (m.reply_to) el.append(quoteNode(m));
   if (m.file) {
     el.append(fileNode(m.file));
-    if (m.text) el.append(mk('div', 'cap', m.text));
-  } else el.append(mk('span', 'txt', m.text));
+    if (m.text) { const cap = mk('div', 'cap'); cap.append(renderRich(m.text)); el.append(cap); }
+  } else { const tx = mk('span', 'txt'); tx.append(renderRich(m.text)); el.append(tx); }
   const d = new Date(m.created_at), t = document.createElement('time');
   t.textContent = (m.edited_at ? 'изменено ' : '') + d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   if (m.from_id === me.id && current?.kind === 'user') t.append(' ', mk('span', 'tick', ''));
@@ -635,10 +668,11 @@ function addMsg(m, animate = true) {
   if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; lastFrom = null; }
   const cont = lastFrom === m.from_id && m.created_at - lastTime < 2 * 60 * 1000;
   lastFrom = m.from_id; lastTime = m.created_at;
+  if (m.id === unreadMarkId) { const dv = mk('div', 'unread-div', 'Непрочитанные сообщения'); dv.id = 'unreadDiv'; box.append(dv); lastFrom = null; }
   const el = document.createElement('div'); el.dataset.mid = m.id;
   el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (m.file ? ' media' : (isBigEmoji(m.text) ? ' big' : ''));
   msgEls.set(m.id, el); msgData.set(m.id, m);
-  fillMsg(el, m); box.append(el);
+  fillMsg(el, m); box.append(el); updateTicks();   // галочки считаем уже после добавления на страницу
 }
 
 function updateTicks() {   // ✓ отправлено, ✓✓ прочитано собеседником
@@ -649,6 +683,86 @@ function updateTicks() {   // ✓ отправлено, ✓✓ прочитан�
   }
 }
 const scrollDown = (smooth = true) => { const b = $('messages'); b.style.scrollBehavior = smooth ? 'smooth' : 'auto'; b.scrollTop = b.scrollHeight; };
+
+// ---------- история по страницам, «вниз», «Непрочитанные», закреп, поиск ----------
+let chatMsgs = [], noMoreOlder = false, loadingOlder = false, unreadMarkId = null, newBelow = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function rerender() {
+  $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear(); msgEls.clear(); msgData.clear(); lastRendered = 0;
+  for (const m of chatMsgs) addMsg(m, false);
+}
+function firstUnreadId(n) {   // n непрочитанных входящих: ищем самое раннее из них в загруженном окне
+  if (!n) return null; let cnt = 0;
+  for (let i = chatMsgs.length - 1; i >= 0; i--) if (chatMsgs[i].from_id !== me.id && ++cnt === n) return chatMsgs[i].id;
+  return chatMsgs[0]?.id ?? null;
+}
+async function loadOlder() {
+  if (loadingOlder || noMoreOlder || !current || current.kind === 'bot' || !chatMsgs.length) return false;
+  loadingOlder = true; const my = openSeq, id = current.id;
+  try {
+    const older = await api(`/api/messages?with=${id}&before=${chatMsgs[0].id}`);
+    if (my !== openSeq) return false;
+    if (older.length < 50) noMoreOlder = true;
+    if (!older.length) return false;
+    const box = $('messages'), h0 = box.scrollHeight, t0 = box.scrollTop;
+    chatMsgs = older.concat(chatMsgs); rerender();
+    box.style.scrollBehavior = 'auto'; box.scrollTop = t0 + (box.scrollHeight - h0);   // читаемое место не «уезжает»
+    return true;
+  } finally { loadingOlder = false; }
+}
+async function jumpTo(id) {   // перейти к сообщению; если оно далеко в прошлом, подгружаем историю
+  let tries = 0;
+  while (!msgEls.has(id) && tries++ < 60) { while (loadingOlder) await sleep(40); if (msgEls.has(id) || noMoreOlder) break; if (!(await loadOlder())) break; }
+  if (!msgEls.has(id)) { toast('Сообщение не найдено или удалено'); return; }
+  scrollToMsg(id);
+}
+const tb = $('toBottom');
+function updateToBottom() {
+  const b = $('messages'), dist = b.scrollHeight - b.scrollTop - b.clientHeight;
+  tb.hidden = dist < 240; if (dist < 80) newBelow = 0; tb.dataset.n = newBelow || '';
+}
+$('messages').addEventListener('scroll', () => { updateToBottom(); if ($('messages').scrollTop < 140) loadOlder(); }, { passive: true });
+tb.onclick = () => { newBelow = 0; scrollDown(true); };
+// на самом верху события прокрутки нет, поэтому подгружаем ещё и по колесу/жесту «вверх»
+$('messages').addEventListener('wheel', (e) => { if (e.deltaY < 0 && $('messages').scrollTop <= 0) loadOlder(); }, { passive: true });
+{ let ty = 0; $('messages').addEventListener('touchstart', (e) => { ty = e.touches[0].clientY; }, { passive: true });
+  $('messages').addEventListener('touchmove', (e) => { if (e.touches[0].clientY - ty > 12 && $('messages').scrollTop <= 0) loadOlder(); }, { passive: true }); }
+
+function renderPin() {
+  const pin = current?.pinned; $('pinbar').hidden = !pin;
+  if (pin) $('pinText').textContent = replyText({ text: pin.text, file: pin.file });
+}
+$('pinbar').onclick = (e) => { if (!e.target.closest('#pinX') && current?.pinned) jumpTo(current.pinned.id); };
+$('pinX').onclick = (e) => { e.stopPropagation(); if (current?.pinned) apiReq('POST', '/api/pin', { id: current.pinned.id, pin: false }).catch((er) => toast(er.message)); };
+
+function highlight(text, term) {   // подсветка найденного без учёта регистра
+  const f = document.createDocumentFragment(), low = text.toLowerCase(), t = term.toLowerCase(); let i = 0, j;
+  while ((j = low.indexOf(t, i)) >= 0 && t) { f.append(text.slice(i, j)); f.append(mk('mark', '', text.slice(j, j + t.length))); i = j + t.length; }
+  f.append(text.slice(i)); return f;
+}
+function openSearch() {
+  if (!current || current.kind === 'bot' || !$('searchtop').hidden) return;
+  $('sres').style.top = $('chat').querySelector('.top').offsetHeight + 'px';
+  $('searchtop').hidden = false; $('sres').hidden = false; $('sq').value = ''; $('sres').innerHTML = '';
+  $('sres').append(mk('div', 'empty', 'Введите слово или фразу')); $('sq').focus(); pushLayer('search', closeSearchUI);
+}
+function closeSearchUI() { $('searchtop').hidden = true; $('sres').hidden = true; $('sq').blur(); }
+$('searchBtn').onclick = openSearch; $('sBack').onclick = () => backLayer();
+$('sClear').onclick = () => { $('sq').value = ''; $('sres').innerHTML = ''; $('sres').append(mk('div', 'empty', 'Введите слово или фразу')); $('sq').focus(); };
+let sTimer;
+$('sq').addEventListener('input', () => { clearTimeout(sTimer); sTimer = setTimeout(runSearch, 250); });
+async function runSearch() {
+  const term = $('sq').value.trim(), box = $('sres'); if (!term || !current) return;
+  const res = await api(`/api/search?with=${current.id}&q=${encodeURIComponent(term)}`);
+  if ($('sq').value.trim() !== term) return;   // пока ждали ответ, запрос изменили
+  box.innerHTML = ''; if (!res.length) { box.append(mk('div', 'empty', 'Ничего не найдено')); return; }
+  for (const r of res) {
+    const row = mk('div', 'sr'), meta = mk('div', 'meta'), d = new Date(r.created_at);
+    meta.append(mk('span', '', replyName(r.from_id)), mk('span', '', d.toLocaleDateString('ru', { day: 'numeric', month: 'short', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }) + ' ' + d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })));
+    const tx = mk('div', 'tx'); tx.append(highlight(stripFmt(r.file ? fileLabel(r.file.mime, r.file.name) + (r.text ? ' ' + r.text : '') : r.text), term));
+    row.append(meta, tx); row.onclick = () => { backLayer(); setTimeout(() => jumpTo(r.id), 90); }; box.append(row);
+  }
+}
 
 // ---------- действия с сообщениями: ответ, реакции, правка, удаление, меню ----------
 let replyTo = null, editing = null;
@@ -682,6 +796,8 @@ function openMenu(m, x, y) {
   for (const e of REACTIONS) { const b = mk('button', myR === e ? 'on' : '', e); b.type = 'button'; b.onclick = () => { backLayer(); toggleReaction(m, e); }; rr.append(b); }
   box.append(rr);
   mkItem('Ответить', () => startReply(m));
+  const pinned = current?.pinned?.id === m.id;
+  mkItem(pinned ? 'Открепить' : 'Закрепить', () => apiReq('POST', '/api/pin', { id: m.id, pin: !pinned }).catch((e) => toast(e.message)));
   if (m.text) mkItem('Копировать текст', () => copyText(m.text));
   if (mine && m.text !== undefined) mkItem('Изменить', () => startEdit(m));
   mkItem('Удалить у меня', () => apiReq('POST', '/api/delete', { id: m.id, all: false }).catch((e) => toast(e.message)), 'danger');
@@ -717,7 +833,7 @@ const endPress = () => {
 box0.addEventListener('touchend', endPress); box0.addEventListener('touchcancel', endPress);
 // двойной тап / двойной клик по сообщению — реакция ❤️
 box0.addEventListener('click', (e) => {
-  if (e.target.closest('.pic, .vid, audio, .doc, .chip, .quote, a')) return;
+  if (e.target.closest('.pic, .vid, audio, .doc, .chip, .quote, .spoiler, a')) return;
   const el = e.target.closest('.msg'); const m = msgOf(e.target); if (!m || !el) return;
   const now = Date.now();
   if (lastTap.id === m.id && now - lastTap.t < 320) { lastTap = { id: 0, t: 0 }; toggleReaction(m, '❤️'); } else lastTap = { id: m.id, t: now };
@@ -932,6 +1048,10 @@ function connect() {
       if (d.online.some((id) => !chats.some((c) => c.id === id))) refreshChats();   // зарегистрировался новый участник
       else { renderChats(); updateStatus(); }
     }
+    if (d.type === 'pin') {   // закреп изменили: обновляем плашку
+      const other = d.peers.find((x) => x !== me.id) ?? me.id, c = chats.find((x) => x.id === other && x.kind !== 'bot');
+      if (c) { c.pinned = d.pinned; if (current?.id === c.id) renderPin(); }
+    }
     if (d.type === 'react') {
       const m = msgData.get(d.id), el = msgEls.get(d.id);
       if (m) { m.reactions = (m.reactions || []).filter((r) => r.user_id !== d.user_id); if (d.emoji) m.reactions.push({ user_id: d.user_id, emoji: d.emoji }); renderReacts(el, m); }
@@ -944,6 +1064,7 @@ function connect() {
     }
     if (d.type === 'del') {
       const el = msgEls.get(d.id);
+      chatMsgs = chatMsgs.filter((x) => x.id !== d.id);
       if (el) { el.classList.add('gone'); setTimeout(() => el.remove(), 220); msgEls.delete(d.id); msgData.delete(d.id); }
       for (const o of msgData.values()) if (o.reply?.id === d.id) { o.reply = { id: d.id, deleted: true }; fillMsg(msgEls.get(o.id), o); }
       loadChats();   // превью «последнего сообщения» в списке могло измениться
@@ -971,7 +1092,7 @@ function connect() {
       if (current?.id === other) {
         if (incoming) updateStatus();
         const nearBottom = $('messages').scrollHeight - $('messages').scrollTop - $('messages').clientHeight < 160;
-        addMsg(m); if (nearBottom || !incoming) scrollDown();
+        chatMsgs.push(m); addMsg(m); if (nearBottom || !incoming) scrollDown(); else { newBelow++; updateToBottom(); }
         if (incoming) { if (isVisible()) markRead(c); else c.unread = (c.unread || 0) + 1; }
       } else if (incoming) c.unread = (c.unread || 0) + 1;
       renderChats();

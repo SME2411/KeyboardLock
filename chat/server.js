@@ -46,6 +46,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_id, to_id, id);
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS reactions (msg_id INTEGER NOT NULL, user_id INTEGER NOT NULL, emoji TEXT NOT NULL, PRIMARY KEY (msg_id, user_id));
+  CREATE TABLE IF NOT EXISTS pins (a INTEGER NOT NULL, b INTEGER NOT NULL, msg_id INTEGER NOT NULL, PRIMARY KEY (a, b));
   CREATE TABLE IF NOT EXISTS hidden_msgs (user_id INTEGER NOT NULL, msg_id INTEGER NOT NULL, PRIMARY KEY (user_id, msg_id));
   CREATE TABLE IF NOT EXISTS reads (user_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, last_id INTEGER NOT NULL, PRIMARY KEY (user_id, peer_id));
   CREATE TABLE IF NOT EXISTS files (
@@ -99,6 +100,14 @@ const q = {
     WHERE ((m.from_id = ?1 AND m.to_id = ?2) OR (m.from_id = ?2 AND m.to_id = ?1)) AND (?3 = 0 OR m.id < ?3)
       AND NOT EXISTS (SELECT 1 FROM hidden_msgs h WHERE h.user_id = ?1 AND h.msg_id = m.id)
     ORDER BY m.id DESC LIMIT 50`),
+  getPin: db.prepare('SELECT msg_id FROM pins WHERE a = ? AND b = ?'),
+  setPin: db.prepare('INSERT OR REPLACE INTO pins (a, b, msg_id) VALUES (?, ?, ?)'),
+  delPin: db.prepare('DELETE FROM pins WHERE a = ? AND b = ?'),
+  searchRows: db.prepare(`SELECT m.id, m.from_id, m.text, m.created_at, f.mime AS fmime, f.name AS fname
+    FROM messages m LEFT JOIN files f ON f.id = m.file_id
+    WHERE ((m.from_id = ?1 AND m.to_id = ?2) OR (m.from_id = ?2 AND m.to_id = ?1))
+      AND NOT EXISTS (SELECT 1 FROM hidden_msgs h WHERE h.user_id = ?1 AND h.msg_id = m.id)
+    ORDER BY m.id DESC LIMIT 20000`),
   oneMsg: db.prepare(`SELECT m.id, m.from_id, m.to_id, m.text, m.created_at, m.reply_to, m.edited_at,
       f.id AS fid, f.name AS fname, f.mime AS fmime, f.size AS fsize, f.w AS fw, f.h AS fh,
       r.id AS rid, r.from_id AS rfrom, r.text AS rtext, rf.mime AS rmime, rf.name AS rname
@@ -166,6 +175,12 @@ const rowToMsg = (r) => ({
   reactions: q.getReact.all(r.id),
 });
 const totalUnread = (uid) => q.allPeers.all(uid).reduce((n, u) => n + q.unreadCount.get(u.id, uid).n, 0);
+const pairKey = (x, y) => [Math.min(x, y), Math.max(x, y)];
+const pinInfo = (x, y) => {   // закреплённое сообщение переписки (одно на чат) в коротком виде
+  const [a, b] = pairKey(x, y), pin = q.getPin.get(a, b); if (!pin) return null;
+  const r = q.oneMsg.get(pin.msg_id); if (!r) return null;
+  return { id: r.id, from_id: r.from_id, text: snippet(r.text), file: r.fmime ? { mime: r.fmime, name: r.fname } : null };
+};
 const fullMsg = (id) => rowToMsg(q.oneMsg.get(id));
 const pairSend = (a, b, obj) => { send(a, obj); if (b !== a) send(b, obj); };   // обоим участникам (себе в «Избранном» — один раз)
 // проверка: ответ можно давать только на сообщение из этой же переписки
@@ -370,7 +385,7 @@ async function api(req, res, url) {
       const l = q.lastMsg.get(me.id, u.id);
       return { id: u.id, username: u.username, last_seen: u.last_seen, self: u.id === me.id,
         display_name: u.display_name, bio: u.bio, avatar_v: u.avatar_v, cover: u.cover,
-        peer_read: u.id === me.id ? 0 : (q.peerRead.get(u.id, me.id)?.last_id || 0),
+        peer_read: u.id === me.id ? 0 : (q.peerRead.get(u.id, me.id)?.last_id || 0), pinned: pinInfo(me.id, u.id),
         unread: u.id === me.id ? 0 : q.unreadCount.get(u.id, me.id).n,
         last: l ? { id: l.id, from_id: l.from_id, text: l.text, created_at: l.created_at, file: l.fmime ? { mime: l.fmime, name: l.fname } : null } : null };
     }));
@@ -397,7 +412,9 @@ async function api(req, res, url) {
     if (b.all === true) {
       if (m.from_id !== me.id) return json(res, 403, { error: 'У обоих можно удалить только своё сообщение' });
       if (m.file_id) { q.delFile.run(m.file_id); fs.rmSync(path.join(UPLOAD_DIR, m.file_id), { force: true }); }
+      const [pa, pb] = pairKey(m.from_id, m.to_id), wasPinned = q.getPin.get(pa, pb)?.msg_id === m.id;
       q.delReactsOf.run(m.id); q.delHiddenOf.run(m.id); q.delMsg.run(m.id);
+      if (wasPinned) { q.delPin.run(pa, pb); pairSend(m.from_id, m.to_id, { type: 'pin', peers: [m.from_id, m.to_id], pinned: null }); }
       pairSend(m.from_id, m.to_id, { type: 'del', id: m.id });
     } else { q.hideMsg.run(me.id, m.id); send(me.id, { type: 'del', id: m.id }); }
     return json(res, 200, { ok: true });
@@ -410,6 +427,26 @@ async function api(req, res, url) {
     if (emoji === null) q.delReact.run(m.id, me.id); else q.setReact.run(m.id, me.id, emoji);
     pairSend(m.from_id, m.to_id, { type: 'react', id: m.id, user_id: me.id, emoji });
     return json(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/pin' && req.method === 'POST') {
+    const b = await readJson(req), m = q.msgById.get(Number(b.id));
+    if (!m || (m.from_id !== me.id && m.to_id !== me.id)) return json(res, 404, { error: 'Нет такого сообщения' });
+    const [a, c] = pairKey(m.from_id, m.to_id);
+    if (b.pin === false) { if (q.getPin.get(a, c)?.msg_id === m.id) q.delPin.run(a, c); } else q.setPin.run(a, c, m.id);
+    pairSend(m.from_id, m.to_id, { type: 'pin', peers: [m.from_id, m.to_id], pinned: pinInfo(m.from_id, m.to_id) });
+    return json(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/search' && req.method === 'GET') {   // поиск без учёта регистра (в SQLite LIKE не понимает кириллицу)
+    const other = Number(url.searchParams.get('with')), term = String(url.searchParams.get('q') || '').trim().toLowerCase().slice(0, 100);
+    if (!q.userById.get(other) || !term) return json(res, 200, []);
+    const out = [];
+    for (const r of q.searchRows.all(me.id, other)) {
+      if (`${r.text || ''}\n${r.fname || ''}`.toLowerCase().includes(term)) {
+        out.push({ id: r.id, from_id: r.from_id, text: String(r.text || '').slice(0, 300), created_at: r.created_at, file: r.fmime ? { mime: r.fmime, name: r.fname } : null });
+        if (out.length >= 50) break;
+      }
+    }
+    return json(res, 200, out);
   }
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
     const cur = reqSid(req);
