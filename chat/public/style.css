@@ -49,12 +49,12 @@ input:focus, textarea:focus { border-color: var(--accent); }
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
 /* ---------- приложение: два экрана (список / чат), на широком — рядом ---------- */
-#app { height: 100dvh; display: grid; grid-template-columns: 1fr; background: var(--bg); }
-#side, #main { min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+#app { height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); background: var(--bg); }
+#side, #main { min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 #app[data-view="chat"] #side { display: none; }
 #app:not([data-view="chat"]) #main { display: none; }
 @media (min-width: 800px) {
-  #app { grid-template-columns: 340px 1fr; max-width: 1180px; margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+  #app { grid-template-columns: 340px minmax(0, 1fr); max-width: 1180px; margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
   #app[data-view="chat"] #side, #app:not([data-view="chat"]) #main { display: flex; }
   #side { border-right: 1px solid var(--line); }
   #back { display: none; }
@@ -178,3 +178,8 @@ input:focus, textarea:focus { border-color: var(--accent); }
 #lightbox { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.92); display: grid; place-items: center; cursor: zoom-out; }
 #lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
 #lightbox a { position: absolute; top: max(14px, env(safe-area-inset-top)); right: 16px; color: #fff; background: rgba(255,255,255,.14); border-radius: 10px; padding: 8px 14px; text-decoration: none; font-size: .9em; }
+
+/* исправления вёрстки */
+#messages > * { flex-shrink: 0; }              /* пузыри с фото/файлами не сплющиваются в длинной переписке */
+.msg.big time { font-size: 12px; }              /* время у крупных эмодзи не должно наследовать 46px */
+#composer textarea { min-width: 0; }            /* на узком экране поле ввода не распирает колонку */
