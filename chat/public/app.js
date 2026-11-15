@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-let me, users = [], current = null, ws, onlineIds = [], registering = false, retry = 0;
+let me, users = [], current = null, ws, onlineIds = [], registering = false, retry = 0, typingTimer = null, isTyping = false;
 const unread = {};
 
 const api = async (path, body) => {
@@ -13,6 +13,7 @@ const api = async (path, body) => {
 $('toggle').onclick = (e) => {
   e.preventDefault(); registering = !registering;
   $('invite').hidden = !registering;
+  $('password').autocomplete = registering ? 'new-password' : 'current-password';
   $('authBtn').textContent = registering ? 'Зарегистрироваться' : 'Войти';
   $('toggle').textContent = registering ? 'Уже есть аккаунт? Войти' : 'Первый раз? Зарегистрироваться';
 };
@@ -38,7 +39,15 @@ async function start() {
   renderContacts();
   connect();
   updateBanner();
+  buildEmoji();
   if (users.length === 1) openChat(users[0]);
+}
+
+// ---------- аватарки: цвет зависит от имени ----------
+function setAvatar(el, name, on) {
+  let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  el.style.setProperty('--h1', `hsl(${h} 85% 66%)`); el.style.setProperty('--h2', `hsl(${(h + 40) % 360} 80% 58%)`);
+  el.textContent = name[0].toUpperCase(); el.classList.toggle('on', !!on);
 }
 
 // ---------- push-уведомления ----------
@@ -55,7 +64,7 @@ function updateBanner() {
     else showBanner('', false);
   } else if (Notification.permission === 'granted') { showBanner('', false); subscribePush().catch(console.error); }
   else if (Notification.permission === 'denied') showBanner('Уведомления запрещены. Разреши их в настройках телефона или браузера.', false);
-  else showBanner('Включи уведомления, чтобы не пропускать сообщения.', true);
+  else showBanner('Включи уведомления, чтобы не пропускать сообщения 🔔', true);
 }
 $('bannerBtn').onclick = async () => {   // запрос разрешения обязан идти из нажатия (требование iOS)
   const perm = await Notification.requestPermission();
@@ -70,7 +79,7 @@ async function subscribePush() {
     const { key } = await api('/api/push/key');
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
   }
-  await api('/api/push/subscribe', sub.toJSON());   // повторная отправка безопасна: сервер обновит запись
+  await api('/api/push/subscribe', sub.toJSON());
 }
 
 // ---------- контакты ----------
@@ -80,76 +89,155 @@ async function refreshUsers() {
   else { if (!current) renderContacts(); updateStatus(); }
 }
 function renderContacts() {
-  $('contacts').innerHTML = '';
-  if (!users.length) $('contacts').textContent = 'Пока никого нет. Пусть второй человек зарегистрируется.';
-  for (const u of users) {
-    const d = document.createElement('div'); d.className = 'contact';
-    const name = document.createElement('span'); name.textContent = u.username;
-    const right = document.createElement('span');
-    if (unread[u.id]) { const b = document.createElement('span'); b.className = 'unread'; b.textContent = unread[u.id]; right.append(b, ' '); }
-    if (onlineIds.includes(u.id)) { const o = document.createElement('span'); o.className = 'dot'; o.textContent = '● онлайн'; right.append(o); }
-    d.append(name, right);
+  const box = $('contacts'); box.innerHTML = '';
+  if (!users.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'Пока никого нет 🌙 Пусть второй человек зарегистрируется.'; box.append(d); }
+  users.forEach((u, i) => {
+    const d = document.createElement('div'); d.className = 'contact'; d.style.animationDelay = i * 60 + 'ms';
+    const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, u.username, onlineIds.includes(u.id));
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = u.username;
+    d.append(av, name);
+    if (unread[u.id]) { const b = document.createElement('span'); b.className = 'unread'; b.textContent = unread[u.id]; d.append(b); }
     d.onclick = () => openChat(u);
-    $('contacts').append(d);
-  }
+    box.append(d);
+  });
 }
-$('back').onclick = () => { current = null; $('chat').hidden = true; $('contacts').hidden = false; $('back').hidden = true; $('title').textContent = 'DuoVerse'; $('status').textContent = ''; renderContacts(); };
+$('back').onclick = () => {
+  current = null; $('chat').hidden = true; $('contacts').hidden = false; $('back').hidden = true; $('avatar').hidden = true;
+  $('title').textContent = 'DuoVerse'; $('status').textContent = ''; $('emoji').hidden = true; renderContacts();
+};
 
 // ---------- чат ----------
-let lastDay = '';
+let lastDay = '', lastFrom = null, lastTime = 0, openSeq = 0;
+const seen = new Set();   // id уже показанных сообщений: защита от дублей
 async function openChat(u) {
+  const my = ++openSeq;
   current = u; unread[u.id] = 0;
   $('contacts').hidden = true; $('chat').hidden = false; $('back').hidden = users.length === 1;
+  $('avatar').hidden = false; setAvatar($('avatar'), u.username, onlineIds.includes(u.id));
   $('title').textContent = u.username; updateStatus();
-  $('messages').innerHTML = ''; lastDay = '';
+  $('messages').innerHTML = ''; lastDay = ''; lastFrom = null; lastTime = 0; seen.clear();
   const list = await api('/api/messages?with=' + u.id);
-  list.forEach(addMsg); scrollDown();
+  if (my !== openSeq) return;   // за время загрузки чат открыли заново: этот ответ устарел
+  list.forEach((m) => addMsg(m, false)); scrollDown(false);
 }
-const updateStatus = () => { if (current) $('status').textContent = onlineIds.includes(current.id) ? 'онлайн' : 'не в сети'; };
-function addMsg(m) {
-  const box = $('messages'), d = new Date(m.created_at), day = d.toLocaleDateString('ru');
-  if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; }
-  const el = document.createElement('div'); el.className = 'msg' + (m.from_id === me.id ? ' me' : '');
+let typingUntil = 0;
+function updateStatus() {
+  if (!current) return;
+  const on = onlineIds.includes(current.id), st = $('status');
+  $('avatar').classList.toggle('on', on);
+  if (Date.now() < typingUntil) { st.textContent = 'печатает'; st.className = 'dots online'; }
+  else { st.className = on ? 'online' : ''; st.textContent = on ? 'онлайн' : 'не в сети'; }
+}
+const segmenter = 'Segmenter' in Intl ? new Intl.Segmenter() : null;
+function isBigEmoji(text) {
+  if (!/^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|‍|️|⃣|\s)+$/u.test(text)) return false;
+  const n = segmenter ? [...segmenter.segment(text.replace(/\s/g, ''))].length : [...text].length;
+  return n >= 1 && n <= 3;
+}
+function addMsg(m, animate = true) {
+  if (seen.has(m.id)) return;
+  seen.add(m.id);
+  const box = $('messages'), d = new Date(m.created_at), day = d.toLocaleDateString('ru', { day: 'numeric', month: 'long' });
+  if (day !== lastDay) { const s = document.createElement('div'); s.className = 'day'; s.textContent = day; box.append(s); lastDay = day; lastFrom = null; }
+  const cont = lastFrom === m.from_id && m.created_at - lastTime < 2 * 60 * 1000;
+  lastFrom = m.from_id; lastTime = m.created_at;
+  const el = document.createElement('div');
+  el.className = 'msg' + (m.from_id === me.id ? ' me' : '') + (cont ? ' cont' : '') + (animate ? ' pop' : '') + (isBigEmoji(m.text) ? ' big' : '');
   el.textContent = m.text;
   const t = document.createElement('time'); t.textContent = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   el.append(t); box.append(el);
 }
-const scrollDown = () => { $('messages').scrollTop = $('messages').scrollHeight; };
+const scrollDown = (smooth = true) => { const b = $('messages'); b.style.scrollBehavior = smooth ? 'smooth' : 'auto'; b.scrollTop = b.scrollHeight; };
 
+// ---------- ввод ----------
+const ta = $('text');
+function syncSend() { $('sendBtn').classList.toggle('idle', !ta.value.trim()); }
+function autosize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; syncSend(); }
+ta.addEventListener('input', () => {
+  autosize();
+  if (current && ws?.readyState === 1 && !isTyping) {   // не чаще раза в 2 секунды
+    isTyping = true; ws.send(JSON.stringify({ type: 'typing', to: current.id }));
+    setTimeout(() => { isTyping = false; }, 2000);
+  }
+});
 $('composer').onsubmit = (e) => { e.preventDefault(); sendText(); };
-$('text').onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !/Mobi|Android|iPhone/i.test(navigator.userAgent)) { e.preventDefault(); sendText(); } };
+ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !/Mobi|Android|iPhone/i.test(navigator.userAgent)) { e.preventDefault(); sendText(); } };
 function sendText() {
-  const text = $('text').value.trim();
+  const text = ta.value.trim();
   if (!text || !current || ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'msg', to: current.id, text }));
-  $('text').value = '';
+  ta.value = ''; autosize(); ta.focus();
+}
+
+// ---------- эмодзи ----------
+const EMOJI = {
+  '😊': '😀 😃 😄 😁 😆 😅 😂 🤣 🥲 ☺️ 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥸 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫣 🤭 🫢 🤫 🫠 😶 😐 😑 😬 🙄 😯 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 😈 💀 🤡 👻 👽 🤖',
+  '❤️': '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 😻 😽 💋 🫶 👍 👎 👌 🤌 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👏 🙌 👐 🤲 🤝 🙏 💪 🫂 👀 🧠 🫦',
+  '🐱': '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦆 🦉 🦄 🐝 🦋 🐢 🐙 🐬 🐳 🌸 🌹 🌺 🌻 🌷 🌲 🌴 🍀 🌈 ☀️ 🌙 ⭐ ✨ ⚡ 🔥 ❄️ 🌊 ☁️ 🌧️',
+  '🍕': '🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍑 🍒 🥑 🍕 🍔 🍟 🌭 🌮 🍣 🍜 🍰 🎂 🍩 🍪 🍫 🍿 ☕ 🍵 🍺 🍷 🥂 🍾 🧁 🍦',
+  '🎉': '⚽ 🏀 🎮 🎧 🎤 🎬 🎁 🎉 🎊 🏆 📷 💻 📱 💡 📚 ✈️ 🚗 🏠 🌍 💎 🔑 🎵 🎶 🕯️ 🧸 🛌 🚀 ⏰ 💌 📌 ✅ ❌ ❓ ❗ 💯',
+};
+function buildEmoji() {
+  const tabs = $('emojiTabs'); if (tabs.childElementCount) return;
+  const recent = () => JSON.parse(localStorage.getItem('recentEmoji') || '[]');
+  const cats = { '🕘': () => recent(), ...Object.fromEntries(Object.entries(EMOJI).map(([k, v]) => [k, () => v.split(' ')])) };
+  const show = (key) => {
+    [...tabs.children].forEach((b) => b.classList.toggle('active', b.dataset.k === key));
+    const grid = $('emojiGrid'); grid.innerHTML = ''; grid.scrollTop = 0;
+    const list = cats[key]();
+    if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.style.gridColumn = '1/-1'; d.textContent = 'Здесь появятся недавние'; grid.append(d); }
+    for (const e of list) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = e;
+      b.onclick = () => {
+        const s = ta.selectionStart ?? ta.value.length, en = ta.selectionEnd ?? s;
+        ta.value = ta.value.slice(0, s) + e + ta.value.slice(en); ta.selectionStart = ta.selectionEnd = s + e.length; autosize();
+        localStorage.setItem('recentEmoji', JSON.stringify([e, ...recent().filter((x) => x !== e)].slice(0, 24)));
+      };
+      grid.append(b);
+    }
+  };
+  for (const k of Object.keys(cats)) {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = k; b.dataset.k = k; b.onclick = () => show(k); tabs.append(b);
+  }
+  $('emojiBtn').onclick = () => {
+    const open = $('emoji').hidden; $('emoji').hidden = !open;
+    $('emojiBtn').textContent = open ? '⌨️' : '😊';
+    if (open) show(recent().length ? '🕘' : '😊'); else ta.focus();
+    setTimeout(() => scrollDown(false), 30);
+  };
 }
 
 // ---------- websocket с автопереподключением ----------
-// Сообщаем серверу, смотрим ли мы сейчас в приложение: если нет, он пришлёт push.
 const isVisible = () => !document.hidden && document.hasFocus();
 const sendVis = () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'vis', visible: isVisible() })); };
 ['visibilitychange', 'focus', 'blur'].forEach((ev) => addEventListener(ev, sendVis));
 
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { retry = 0; sendVis(); if (current) openChat(current); };  // подтянуть пропущенное
+  ws.onopen = () => { retry = 0; sendVis(); if (current) openChat(current); };
   ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
     if (d.type === 'presence') {
       onlineIds = d.online;
-      // кто-то новый зарегистрировался и зашёл: обновляем список контактов
       if (d.online.some((id) => id !== me.id && !users.some((u) => u.id === id))) refreshUsers();
       else { if (!current) renderContacts(); updateStatus(); }
     }
+    if (d.type === 'typing' && current?.id === d.from) {
+      typingUntil = Date.now() + 3000; updateStatus();
+      clearTimeout(typingTimer); typingTimer = setTimeout(updateStatus, 3100);
+    }
     if (d.type === 'msg') {
       const other = d.msg.from_id === me.id ? d.msg.to_id : d.msg.from_id;
-      if (current?.id === other) { addMsg(d.msg); scrollDown(); }
-      else if (d.msg.from_id !== me.id) { unread[other] = (unread[other] || 0) + 1; if (!current) renderContacts(); }
+      if (current?.id === other) {
+        typingUntil = 0; updateStatus();
+        const nearBottom = $('messages').scrollHeight - $('messages').scrollTop - $('messages').clientHeight < 160;
+        addMsg(d.msg); if (nearBottom || d.msg.from_id === me.id) scrollDown();
+      } else if (d.msg.from_id !== me.id) { unread[other] = (unread[other] || 0) + 1; if (!current) renderContacts(); }
     }
   };
   ws.onclose = () => { setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000)); };
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && ws?.readyState !== 1) { ws?.close(); connect(); } });
 
+syncSend();
 start();

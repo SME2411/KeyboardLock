@@ -231,6 +231,11 @@ wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.type === 'vis') { ws.visible = m.visible === true; return; }
+    if (m.type === 'typing') {   // «печатает…» просто пересылаем собеседнику, в базу не пишем
+      const t = Number(m.to);
+      if (t !== me.id && q.userById.get(t)) send(t, { type: 'typing', from: me.id });
+      return;
+    }
     if (m.type !== 'msg') return;
     const to = Number(m.to), text = String(m.text || '').trim().slice(0, 4000);
     if (!text || to === me.id || !q.userById.get(to)) return;
